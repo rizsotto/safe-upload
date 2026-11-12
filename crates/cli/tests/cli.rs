@@ -2,47 +2,13 @@
 
 #[path = "../../core/tests/common/mod.rs"]
 mod common;
+mod env;
 
-use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
 use std::path::Path;
 
-use assert_cmd::Command;
 use common::fixtures;
-use tempfile::TempDir;
-
-/// A fresh fake `$XDG_RUNTIME_DIR` and a work folder.
-struct Env {
-    runtime: TempDir,
-    work: TempDir,
-}
-
-impl Env {
-    fn new() -> Self {
-        let runtime = tempfile::tempdir().unwrap();
-        fs::set_permissions(runtime.path(), Permissions::from_mode(0o700)).unwrap();
-        Self {
-            runtime,
-            work: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn cmd(&self) -> Command {
-        let mut c = Command::cargo_bin("safe-upload").unwrap();
-        c.env("XDG_RUNTIME_DIR", self.runtime.path())
-            .current_dir(self.work.path());
-        c
-    }
-
-    fn private_files(&self) -> usize {
-        let base = self.runtime.path().join("safe-upload");
-        let Ok(dirs) = fs::read_dir(base) else {
-            return 0;
-        };
-        dirs.map(|d| fs::read_dir(d.unwrap().path()).unwrap().count())
-            .sum()
-    }
-}
+use env::Env;
 
 fn fixture(name: &str) -> std::path::PathBuf {
     fixtures().join(name)
