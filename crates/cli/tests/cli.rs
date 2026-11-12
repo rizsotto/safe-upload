@@ -4,7 +4,8 @@
 mod common;
 mod env;
 
-use std::fs;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use common::fixtures;
@@ -184,4 +185,59 @@ fn prints_a_summary_on_stderr() {
         !stderr.contains("out.jpg") && !stderr.contains("Budapest"),
         "{stderr}"
     );
+}
+
+/// Batch with a destination that cannot be written: nothing is left at
+/// `-o`, not even the outputs that came before.
+#[test]
+fn failed_batch_leaves_nothing_at_o() {
+    let batch = |env: &Env, dest: &Path| {
+        env.cmd()
+            .arg(fixture("exif-gps-thumb.jpg"))
+            .arg(fixture("alpha.png"))
+            .args(["--max-size", "1MB", "-o"])
+            .arg(dest)
+            .assert()
+            .code(1);
+    };
+    let names = |dest: &Path| -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // The second output's name is taken by a folder.
+    let env = Env::new();
+    let dest = env.work.path().join("dest");
+    fs::create_dir_all(dest.join("image-2.png")).unwrap();
+    batch(&env, &dest);
+    assert_eq!(names(&dest), ["image-2.png"]);
+    assert_eq!(env.private_files(), 0);
+
+    // The destination folder is read-only.
+    let env = Env::new();
+    let dest = env.work.path().join("dest");
+    fs::create_dir(&dest).unwrap();
+    fs::set_permissions(&dest, Permissions::from_mode(0o500)).unwrap();
+    batch(&env, &dest);
+    fs::set_permissions(&dest, Permissions::from_mode(0o700)).unwrap();
+    assert!(names(&dest).is_empty());
+}
+
+#[test]
+fn output_file_has_mode_0600() {
+    let env = Env::new();
+    env.cmd()
+        .arg(fixture("p3.jpg"))
+        .args(["--max-size", "1MB", "-o", "out.jpg"])
+        .assert()
+        .success();
+    let mode = fs::metadata(env.work.path().join("out.jpg"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
