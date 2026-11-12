@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use safe_upload_app::item::ImageItem;
+use safe_upload_app::save::SaveError;
 use safe_upload_app::window::Window;
 use safe_upload_app::{config, window};
 use safe_upload_core::Options;
@@ -406,6 +407,234 @@ fn keep_names_and_format_settings() {
     win.destroy();
 }
 
+fn action_enabled(win: &Window, name: &str) -> bool {
+    win.lookup_action(name).unwrap().is_enabled()
+}
+
+/// `exiftool` groups that hold metadata. None may show up in a saved file.
+fn assert_no_metadata(path: &Path) {
+    let out = Command::new("exiftool")
+        .args(["-a", "-u", "-G1", "-s"])
+        .arg(path)
+        .output()
+        .expect("exiftool is in the devcontainer");
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    for line in text.lines() {
+        let group = line
+            .strip_prefix('[')
+            .and_then(|l| l.split_once(']'))
+            .map(|(g, _)| g)
+            .unwrap_or_else(|| panic!("odd exiftool line: {line}"));
+        assert!(
+            matches!(group, "ExifTool" | "System" | "File" | "JFIF" | "Composite"),
+            "saved file shows {line}"
+        );
+    }
+}
+
+fn save_one_writes_the_verified_bytes() {
+    let (dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let before = snapshot(dir.path());
+    let win = new_window();
+    assert!(!action_enabled(&win, "save"));
+    win.add_files(&files);
+    wait_idle(&win);
+    assert!(action_enabled(&win, "save"));
+    assert!(action_enabled(&win, "copy"));
+    let item = win.model().items()[0].clone();
+    let out = item.output().unwrap();
+    assert_eq!(item.title(), "image.jpg");
+
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join(item.title());
+    let ctx = glib::MainContext::default();
+    ctx.block_on(win.save_to_file(path.clone())).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), out.bytes);
+    assert_no_metadata(&path);
+
+    // Choosing the original in the dialog never replaces it.
+    let original = files[0].path().unwrap();
+    let err = ctx
+        .block_on(win.save_to_file(original.clone()))
+        .unwrap_err();
+    assert!(matches!(err, SaveError::Original), "{err}");
+    assert_eq!(win.last_toast().as_deref(), Some(err.to_string().as_str()));
+    let hard = folder.path().join("hard.jpg");
+    fs::hard_link(&original, &hard).unwrap();
+    let err = ctx.block_on(win.save_to_file(hard)).unwrap_err();
+    assert!(matches!(err, SaveError::Original), "{err}");
+
+    // A link is never followed, and the file behind it is left alone.
+    let theirs = folder.path().join("theirs.jpg");
+    fs::write(&theirs, "theirs").unwrap();
+    let link = folder.path().join("link.jpg");
+    std::os::unix::fs::symlink(&theirs, &link).unwrap();
+    let err = ctx.block_on(win.save_to_file(link.clone())).unwrap_err();
+    assert!(matches!(err, SaveError::Link), "{err}");
+    assert_eq!(fs::read(&theirs).unwrap(), b"theirs");
+    assert!(link.is_symlink());
+
+    // Replacing a file the user chose in the dialog is allowed.
+    ctx.block_on(win.save_to_file(theirs.clone())).unwrap();
+    assert_eq!(fs::read(&theirs).unwrap(), out.bytes);
+    assert_eq!(snapshot(dir.path()), before);
+    win.destroy();
+}
+
+fn save_batch_to_folder_never_overwrites() {
+    let (dir, files) = inputs(&["exif-gps-thumb.jpg", "png-text.png"]);
+    let before = snapshot(dir.path());
+    let win = new_window();
+    win.add_files(&files);
+    wait_idle(&win);
+    assert!(action_enabled(&win, "save"));
+    assert!(!action_enabled(&win, "copy"));
+    let outs: Vec<_> = win
+        .model()
+        .items()
+        .iter()
+        .map(|i| i.output().unwrap())
+        .collect();
+    let ctx = glib::MainContext::default();
+
+    let folder = tempfile::tempdir().unwrap();
+    assert_eq!(
+        ctx.block_on(win.save_to_folder(folder.path().into()))
+            .unwrap(),
+        2
+    );
+    let saved = snapshot(folder.path());
+    assert_eq!(saved.len(), 2);
+    for (i, (path, bytes)) in saved.iter().enumerate() {
+        assert_eq!(
+            path.file_name().unwrap(),
+            format!("image-{}.jpg", i + 1).as_str()
+        );
+        assert_eq!(*bytes, outs[i].bytes);
+        assert_no_metadata(path);
+    }
+    // Again into the same folder: nothing is written or replaced.
+    let err = ctx
+        .block_on(win.save_to_folder(folder.path().into()))
+        .unwrap_err();
+    assert_eq!(err.to_string(), "image-1.jpg already exists in that folder");
+    assert_eq!(snapshot(folder.path()), saved);
+
+    // One name taken: the other file is not written either.
+    let other = tempfile::tempdir().unwrap();
+    fs::write(other.path().join("image-2.jpg"), "mine").unwrap();
+    let err = ctx
+        .block_on(win.save_to_folder(other.path().into()))
+        .unwrap_err();
+    assert!(
+        matches!(err, SaveError::Exists(ref n) if n == "image-2.jpg"),
+        "{err}"
+    );
+    let left = snapshot(other.path());
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].1, b"mine");
+
+    // A failed image blocks Save.
+    let (_d, txt) = inputs(&["notes.txt"]);
+    win.add_files(&txt);
+    wait_idle(&win);
+    assert!(!action_enabled(&win, "save"));
+    let err = ctx
+        .block_on(win.save_to_folder(other.path().into()))
+        .unwrap_err();
+    assert!(matches!(err, SaveError::NotReady), "{err}");
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Not every image is ready")
+    );
+    let err = ctx
+        .block_on(win.save_to_file(other.path().join("x.jpg")))
+        .unwrap_err();
+    assert!(matches!(err, SaveError::NotReady), "{err}");
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Not every image is ready")
+    );
+    assert_eq!(snapshot(other.path()).len(), 1);
+    assert_eq!(snapshot(dir.path()), before);
+    win.destroy();
+}
+
+fn copy_puts_the_verified_bytes_on_the_clipboard() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg", "png-text.png"]);
+    let win = new_window();
+    win.settings().set_string("output-format", "png").unwrap();
+    win.add_files(&files);
+    wait_idle(&win);
+    assert!(!action_enabled(&win, "copy"));
+    assert!(win.copy().is_err());
+
+    win.model().remove(&win.model().items()[0]);
+    assert!(action_enabled(&win, "copy"));
+    let out = win.model().items()[0].output().unwrap();
+    win.copy().unwrap();
+
+    let clipboard = win.clipboard();
+    let formats = clipboard.formats();
+    assert_eq!(formats.mime_types().as_slice(), ["image/png"]);
+    // GDK adds texture types for readers in this process; what we offer
+    // (and what other apps see) is only the bytes under their MIME type.
+    let offered = clipboard.content().unwrap().formats();
+    assert!(offered.types().is_empty(), "{}", offered.to_str());
+    assert_eq!(offered.mime_types(), formats.mime_types());
+    let (bytes, mime) =
+        glib::MainContext::default().block_on(read_clipboard(&clipboard, "image/png"));
+    assert_eq!(mime, "image/png");
+    assert_eq!(bytes, out.bytes);
+    win.destroy();
+}
+
+fn copy_jpeg_keeps_its_mime_type() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let win = new_window();
+    win.add_files(&files);
+    wait_idle(&win);
+    let out = win.model().items()[0].output().unwrap();
+    win.copy().unwrap();
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Copied. Keep Safe Upload open until you paste.")
+    );
+    let clipboard = win.clipboard();
+    let formats = clipboard.formats();
+    assert_eq!(formats.mime_types().as_slice(), ["image/jpeg"]);
+    // GDK adds texture types for readers in this process; what we offer
+    // (and what other apps see) is only the bytes under their MIME type.
+    let offered = clipboard.content().unwrap().formats();
+    assert!(offered.types().is_empty(), "{}", offered.to_str());
+    assert_eq!(offered.mime_types(), formats.mime_types());
+    let (bytes, mime) =
+        glib::MainContext::default().block_on(read_clipboard(&clipboard, "image/jpeg"));
+    assert_eq!(mime, "image/jpeg");
+    assert_eq!(bytes, out.bytes);
+    win.destroy();
+}
+
+async fn read_clipboard(clipboard: &gtk::gdk::Clipboard, mime: &str) -> (Vec<u8>, String) {
+    let (stream, mime) = clipboard
+        .read_future(&[mime], glib::Priority::DEFAULT)
+        .await
+        .unwrap();
+    let mut all = Vec::new();
+    loop {
+        let chunk = stream
+            .read_bytes_future(64 * 1024, glib::Priority::DEFAULT)
+            .await
+            .unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        all.extend_from_slice(&chunk);
+    }
+    (all, mime.to_string())
+}
+
 fn make_stale_folders() {
     let base = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("safe-upload");
     let old = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
@@ -511,6 +740,22 @@ fn main() -> ExitCode {
         (
             "keep_names_and_format_settings",
             keep_names_and_format_settings,
+        ),
+        (
+            "save_one_writes_the_verified_bytes",
+            save_one_writes_the_verified_bytes,
+        ),
+        (
+            "save_batch_to_folder_never_overwrites",
+            save_batch_to_folder_never_overwrites,
+        ),
+        (
+            "copy_puts_the_verified_bytes_on_the_clipboard",
+            copy_puts_the_verified_bytes_on_the_clipboard,
+        ),
+        (
+            "copy_jpeg_keeps_its_mime_type",
+            copy_jpeg_keeps_its_mime_type,
         ),
         (
             "missing_weston_fails_with_clear_message",

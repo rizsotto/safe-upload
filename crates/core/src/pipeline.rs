@@ -86,7 +86,7 @@ pub fn prepare_with(
     let encoder = encoder_for(format)?;
     let fitted = fit::fit(&px, opts.target_bytes, opts.max_long_edge, encoder.as_ref())?;
     // Leaky bytes are never written, not even for a moment.
-    verify::verify(&fitted.bytes, OUTPUT_PROFILE.map(OutputProfile::bytes))?;
+    verify_output(&fitted.bytes)?;
     // 7. Write to the private folder with a neutral name.
     let name = output_name(input, opts, target, encoder.extension());
     let path = target.dir.write(&name, &fitted.bytes)?;
@@ -204,8 +204,14 @@ fn scan_input(
 }
 
 fn verify_file(path: &Path) -> Result<(), Error> {
-    let bytes = std::fs::read(path)?;
-    verify::verify(&bytes, OUTPUT_PROFILE.map(OutputProfile::bytes))
+    verify_output(&std::fs::read(path)?)
+}
+
+/// Checks output bytes against what the pipeline writes: image data and
+/// only the output profile (S-6). Callers that hold output bytes run this
+/// again before they hand them on.
+pub fn verify_output(bytes: &[u8]) -> Result<(), Error> {
+    verify::verify(bytes, OUTPUT_PROFILE.map(OutputProfile::bytes))
 }
 
 #[cfg(test)]

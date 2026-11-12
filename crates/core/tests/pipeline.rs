@@ -10,7 +10,7 @@ use common::fixtures;
 use safe_upload_core::decode::GlycinDecoder;
 use safe_upload_core::encode::{Encoder, JpegEncoder, Pixels};
 use safe_upload_core::output::PrivateDir;
-use safe_upload_core::pipeline::{default_encoder, prepare_with};
+use safe_upload_core::pipeline::{default_encoder, prepare_with, verify_output};
 use safe_upload_core::verify::verify;
 use safe_upload_core::{Error, Format, Limits, Options, OutputFormat, Target, prepare};
 
@@ -175,6 +175,21 @@ fn leaky_encoder_fails_closed_and_leaves_no_file() {
     let mtime = fs::metadata(dir.path()).unwrap().modified().unwrap();
     assert_eq!(mtime, old, "the leaky bytes were never written");
     assert_eq!(fs::read(&input).unwrap(), original);
+}
+
+#[test]
+fn verify_output_accepts_outputs_and_refuses_metadata() {
+    let dir = private_dir("verify-output");
+    let p = prepare(
+        &fixtures().join("exif-gps-thumb.jpg"),
+        &Options::new(1_000_000),
+        one(&dir),
+    )
+    .unwrap();
+    let bytes = fs::read(&p.path).unwrap();
+    verify_output(&bytes).unwrap();
+    let original = common::fixture("exif-gps-thumb.jpg");
+    assert!(matches!(verify_output(&original), Err(Error::Verify(_))));
 }
 
 #[test]
