@@ -35,7 +35,7 @@
         {
           "type": "dir",
           "path": "../..",
-          "skip": [".flatpak-builder", "flatpak_app", "repo", "target"]
+          "skip": [".git", ".flatpak-builder", "flatpak_app", "repo", "target"]
         },
         "cargo-sources.json"
       ]

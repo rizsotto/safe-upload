@@ -40,6 +40,16 @@ def strings(node, path):
             yield from strings(v, f"{path}.{k}")
 
 
+def lists(node, path):
+    if isinstance(node, list):
+        yield path, node
+        for i, v in enumerate(node):
+            yield from lists(v, f"{path}[{i}]")
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            yield from lists(v, f"{path}.{k}")
+
+
 def check_manifest(path):
     with open(path, encoding="utf-8") as f:
         manifest = json.load(f)
@@ -52,10 +62,15 @@ def check_manifest(path):
     for a in args:
         if a not in ALLOWED_ARGS:
             bad(f"{path}: finish-arg {a!r} is not allowed")
-    # Network in the build sandbox (build-args) counts too, anywhere.
+    # Network in the build or test sandbox (build-args, test-args) counts
+    # too, anywhere, also as the two arguments "--share" "network".
     for where, s in strings(manifest, "$"):
         if "--share=network" in s:
             bad(f"{path}: {where} has --share=network")
+    for where, items in lists(manifest, "$"):
+        for a, b in zip(items, items[1:]):
+            if a == "--share" and b == "network":
+                bad(f"{path}: {where} has --share network")
 
 
 def check_metadata(path):

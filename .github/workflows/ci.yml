@@ -8,13 +8,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # glycin decodes inside bwrap, which needs unprivileged user
       # namespaces. Ubuntu's AppArmor blocks them by default. Core forces
       # the sandbox, so the tests fail if bwrap cannot run (SPEC S-4).
       - name: Allow user namespaces for bwrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - uses: devcontainers/ci@v0.3
+      - uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
         with:
           configFile: .github/ci/devcontainer.json
           runCmd: |
@@ -37,7 +37,7 @@ jobs:
             cargo test --locked --workspace
       # The flatpak job tests the HEIC path with these; its container has
       # no x265 encoder to make them.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: heic-fixtures
           path: target/fixtures/heic-*.heic
@@ -48,15 +48,20 @@ jobs:
   flatpak:
     needs: check
     runs-on: ubuntu-latest
+    # gnome-51 tag as of 2026-09-22. /var/lib/flatpak on a volume: updating
+    # the image's runtimes on overlay storage can fail with "Invalid
+    # cross-device link" (seen under podman, T13).
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      image: ghcr.io/flathub-infra/flatpak-github-actions@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
       options: --privileged
+      volumes:
+        - flatpak-sys:/var/lib/flatpak
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: cargo-sources.json matches Cargo.lock
         run: build-aux/flatpak/update-cargo-sources.sh --check
       # run-tests stays off: the action adds --share=network to test-args.
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
         with:
           manifest-path: build-aux/flatpak/org.example.SafeUpload.json
           bundle: safe-upload.flatpak
@@ -70,7 +75,7 @@ jobs:
           build-aux/flatpak/flatpak-github-action-modified-org.example.SafeUpload.json
           flatpak_app
       # After the build, so the manifest's dir source does not copy them.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: heic-fixtures
           path: heic-fixtures
@@ -79,7 +84,7 @@ jobs:
         run: flatpak install --user -y --noninteractive safe-upload.flatpak
       - name: HEIC in the Flatpak
         run: build-aux/flatpak/test-heic.sh heic-fixtures heic-out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: heic-outputs
@@ -91,12 +96,12 @@ jobs:
     needs: flatpak
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: heic-outputs
           path: heic-out
-      - uses: devcontainers/ci@v0.3
+      - uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
         with:
           configFile: .github/ci/devcontainer.json
           runCmd: build-aux/ci/check-heic-outputs.sh heic-out

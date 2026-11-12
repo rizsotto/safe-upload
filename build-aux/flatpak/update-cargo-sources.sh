@@ -27,7 +27,8 @@ curl -fsSL -o "$tmp/gen/flatpak-cargo-generator.py" \
     "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$rev/cargo/flatpak-cargo-generator.py"
 echo "$sha256  $tmp/gen/flatpak-cargo-generator.py" | sha256sum -c --quiet -
 
-python3 -I "$tmp/gen/flatpak-cargo-generator.py" "$root/Cargo.lock" -o "$tmp/cargo-sources.json"
+# -P, not -I: the flathub image finds aiohttp and tomlkit via PYTHONPATH.
+python3 -P "$tmp/gen/flatpak-cargo-generator.py" "$root/Cargo.lock" -o "$tmp/cargo-sources.json"
 
 if [ -n "$check" ]; then
     if ! cmp -s "$tmp/cargo-sources.json" "$out"; then

@@ -69,7 +69,39 @@ cat >"$tmp/build-net.json" <<'EOF'
 EOF
 expect 1 "$tmp/build-net.json"
 
-printf '{ not json' >"$tmp/broken.json"
+# The shape flatpak-github-actions writes when run-tests is on.
+cat >"$tmp/test-net.json" <<'EOF'
+{
+  "id": "org.example.Test",
+  "finish-args": ["--socket=wayland"],
+  "build-options": {"test-args": ["--socket=x11", "--share=network"]},
+  "modules": []
+}
+EOF
+expect 1 "$tmp/test-net.json"
+
+# Network as two arguments.
+cat >"$tmp/build-net2.json" <<'EOF'
+{
+  "id": "org.example.Test",
+  "finish-args": ["--socket=wayland"],
+  "modules": [{"name": "m", "build-options": {"build-args": ["--share", "network"]}}]
+}
+EOF
+expect 1 "$tmp/build-net2.json"
+manifest finish-net2 --socket=wayland --share network
+expect 1 "$tmp/finish-net2.json"
+# "--share" "ipc" in build-args is not network.
+cat >"$tmp/build-ipc2.json" <<'EOF'
+{
+  "id": "org.example.Test",
+  "finish-args": ["--socket=wayland"],
+  "modules": [{"name": "m", "build-options": {"build-args": ["--share", "ipc"]}}]
+}
+EOF
+expect 0 "$tmp/build-ipc2.json"
+
+printf '{ not json'>"$tmp/broken.json"
 expect 2 "$tmp/broken.json"
 expect 2 "$tmp/missing.json"
 expect 2
