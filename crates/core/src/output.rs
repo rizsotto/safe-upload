@@ -127,8 +127,14 @@ fn ensure_base(runtime_dir: &Path) -> Result<PathBuf, Error> {
     if !meta.is_dir() || meta.uid() != owner {
         return Err(Error::UnsafeTempDir);
     }
-    // Opening the folder pins it, so the mode change cannot follow a swap.
-    File::open(&base)?.set_permissions(Permissions::from_mode(0o700))?;
+    // Open the folder, then make sure it is the one checked above (same
+    // device and inode), so a symlink swapped in between is not followed.
+    let dir = File::open(&base)?;
+    let opened = dir.metadata()?;
+    if opened.dev() != meta.dev() || opened.ino() != meta.ino() {
+        return Err(Error::UnsafeTempDir);
+    }
+    dir.set_permissions(Permissions::from_mode(0o700))?;
     Ok(base)
 }
 
