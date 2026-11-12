@@ -60,6 +60,17 @@ done
 [ "$(head -c 2 truncated.jpg | od -An -tx1 | tr -d ' ')" = ffd8 ] || bad "truncated.jpg: no SOI"
 [ "$(tail -c 2 truncated.jpg | od -An -tx1 | tr -d ' ')" != ffd9 ] || bad "truncated.jpg: ends with EOI"
 if magick truncated.png info: >/dev/null 2>&1; then bad "truncated.png: still decodes"; fi
+# The cut must be inside IDAT, after all chunks before it are whole.
+perl -0777 -ne '
+    my $i = 8;
+    while ($i + 8 <= length) {
+        my ($len, $type) = unpack "Na4", substr($_, $i, 8);
+        if ($type eq "IDAT") { exit($i + 12 + $len > length ? 0 : 1) }
+        $i += 12 + $len;
+    }
+    exit 1;
+' truncated.png || bad "truncated.png: not cut inside IDAT"
+[ -f .safe-upload-fixtures ] || bad "no .safe-upload-fixtures marker"
 
 [ "$fail" = 0 ] && echo "fixtures: all checks passed"
 exit "$fail"

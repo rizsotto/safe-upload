@@ -8,6 +8,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=${1:-"$here/../../target/fixtures"}
 mkdir -p "$(dirname "$out")"
 out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
+# The old output is deleted below. Only ever delete a folder this script
+# made, never one that happens to be passed by mistake.
+marker=.safe-upload-fixtures
+if [ -e "$out" ] && [ ! -f "$out/$marker" ]; then
+    echo "make.sh: $out exists and is not a fixture folder (no $marker). Refusing to replace it." >&2
+    exit 1
+fi
 tmp=$(mktemp -d "$out.tmp.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
@@ -119,13 +126,20 @@ perl -0777 -pi -e '
     substr($_, $i + 5, 4) = pack("nn", 20000, 20000);
 ' huge-dims.jpg
 
-# 8. Truncated files: the first half of a valid file.
-for f in exif-gps-thumb.jpg png-text.png; do
-    size=$(wc -c <"$f")
-    head -c $((size / 2)) "$f" >"truncated.${f##*.}"
-done
+# 8. Truncated files. JPEG: the first half of a valid file. PNG: cut in
+#    the middle of the IDAT data, so every chunk before it is whole.
+size=$(wc -c <exif-gps-thumb.jpg)
+head -c $((size / 2)) exif-gps-thumb.jpg >truncated.jpg
+mk -size 256x256 gradient:red-blue -strip PNG24:png-src.png
+perl -0777 -ne '
+    my $i = index($_, "IDAT") - 4;
+    die "no IDAT" if $i < 0;
+    my $len = unpack "N", substr($_, $i, 4);
+    print substr($_, 0, $i + 8 + int($len / 2));
+' png-src.png >truncated.png
 
-rm -f thumb-src.jpg makernote.bin
+rm -f thumb-src.jpg makernote.bin png-src.png
+touch "$marker"
 cd /
 rm -rf "$out"
 mv "$tmp" "$out"
