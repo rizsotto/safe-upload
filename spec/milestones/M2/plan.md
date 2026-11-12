@@ -277,7 +277,13 @@ impl EditModel {
   crop is dimmed.
 - Mouse: `gtk::GestureDrag` draws a new area with the current tool, or moves
   the selected area when the drag starts inside it, or resizes from a
-  handle. Click selects.
+  handle. Click selects. A press that moves less than 4 points is a
+  click: it selects the topmost area under it or clears the selection,
+  and never draws (so a click on or inside a pixel behaves the same). A
+  real drag always draws, at least 1 px per side before the 4 px minimum.
+- On screen, each area shows the core-redacted preview clipped to the
+  exact model rect (preview rects round outward, the clip cuts them back),
+  so an area is never drawn smaller or larger than in the model.
 - Toolbar (in the widget, so it is reusable): linked `gtk::ToggleButton`s
   Box, Pixelate, Blur, Crop with icons, text tooltips and accessible
   labels; Undo, Redo, Delete buttons.

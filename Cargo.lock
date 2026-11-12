@@ -2324,7 +2324,9 @@ dependencies = [
 name = "safe-upload-editor-widget"
 version = "0.0.0"
 dependencies = [
+ "gtk4",
  "image",
+ "libc",
  "safe-upload-core",
 ]
 
