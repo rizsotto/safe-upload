@@ -2,6 +2,7 @@
 
 pub mod cleanup;
 pub mod config;
+pub mod edit_dialog;
 pub mod item;
 pub mod model;
 pub mod save;

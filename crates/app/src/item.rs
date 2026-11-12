@@ -8,7 +8,9 @@ use gettextrs::gettext;
 use gtk::glib;
 use gtk::glib::prelude::*;
 use gtk::glib::subclass::prelude::*;
+use safe_upload_core::edit::{Rect, Redaction};
 use safe_upload_core::summary::Summary;
+use safe_upload_editor_widget::EditModel;
 
 /// A verified output, kept in memory. Its private folder is already gone.
 #[derive(Debug)]
@@ -35,6 +37,11 @@ mod imp {
         pub busy: Cell<bool>,
         #[property(get)]
         pub failed: Cell<bool>,
+        /// The editor preview is being loaded.
+        #[property(get)]
+        pub loading: Cell<bool>,
+        /// The redaction edits, with their undo history.
+        pub edits: RefCell<Option<EditModel>>,
         pub output: RefCell<Option<Rc<Output>>>,
         /// The generation the current settings need, and the one the
         /// current state was made with. Equal when nothing is left to do.
@@ -69,6 +76,30 @@ impl ImageItem {
 
     pub fn output(&self) -> Option<Rc<Output>> {
         self.imp().output.borrow().clone()
+    }
+
+    pub fn edits(&self) -> Option<EditModel> {
+        self.imp().edits.borrow().clone()
+    }
+
+    /// The crop and redactions for `core::Options`.
+    pub fn edit_options(&self) -> (Option<Rect>, Vec<Redaction>) {
+        self.imp()
+            .edits
+            .borrow()
+            .as_ref()
+            .map(EditModel::to_options)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_edits(&self, edits: Option<EditModel>) {
+        self.imp().edits.replace(edits);
+    }
+
+    pub(crate) fn set_loading(&self, loading: bool) {
+        if self.imp().loading.replace(loading) != loading {
+            self.notify_loading();
+        }
     }
 
     pub(crate) fn set_title(&self, title: String) {

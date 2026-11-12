@@ -17,6 +17,7 @@ use gtk::gio::prelude::*;
 use gtk::glib;
 use safe_upload_core::output::{PrivateDir, file_name};
 use safe_upload_core::{Error, Format, Options, Target, prepare};
+use safe_upload_editor_widget::EditModel;
 
 use crate::item::{ImageItem, Output};
 
@@ -121,6 +122,29 @@ impl Model {
         self.rename();
     }
 
+    /// Stores the editor's edits on `item`. If its crop or redactions
+    /// changed, the item is prepared again.
+    pub fn set_edits(&self, item: &ImageItem, edits: EditModel) {
+        self.replace_edits(item, Some(edits));
+    }
+
+    /// Drops the edits of `item`, as when they no longer fit the image.
+    pub fn clear_edits(&self, item: &ImageItem) {
+        self.replace_edits(item, None);
+    }
+
+    fn replace_edits(&self, item: &ImageItem, edits: Option<EditModel>) {
+        if self.0.store.find(item).is_none() {
+            return;
+        }
+        let before = item.edit_options();
+        item.set_edits(edits);
+        if item.edit_options() != before {
+            item.invalidate(self.next_generation());
+            self.schedule();
+        }
+    }
+
     fn next_generation(&self) -> u64 {
         let g = self.0.generation.get() + 1;
         self.0.generation.set(g);
@@ -166,8 +190,11 @@ impl Model {
         };
         let generation = item.wanted();
         let path = item.path().to_owned();
+        let (crop, redactions) = item.edit_options();
         let options = Options {
             keep_name: false,
+            crop,
+            redactions,
             ..self.options()
         };
         self.0.working.set(true);
