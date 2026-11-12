@@ -1977,6 +1977,10 @@ dependencies = [
 [[package]]
 name = "safe-upload-editor-widget"
 version = "0.0.0"
+dependencies = [
+ "image",
+ "safe-upload-core",
+]
 
 [[package]]
 name = "safe-upload-portal"
