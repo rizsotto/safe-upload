@@ -25,6 +25,9 @@ All work happens in a devcontainer (Fedora, Rust, GTK4, libadwaita).
   devcontainer exec --workspace-folder . --docker-path podman bash
   ```
 
+- Run the app from a dev build with `cargo run -p safe-upload-app`. The
+  build compiles the settings schema, so no install is needed.
+
 ## Docs
 
 - [spec/SPEC.md](spec/SPEC.md): what we build and the rules.

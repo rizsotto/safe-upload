@@ -1,5 +1,7 @@
 //! Settings panel bound to GSettings (SPEC 6.2 step 2, M2 plan "Settings").
 
+use std::path::{Path, PathBuf};
+
 use adw::prelude::*;
 use gettextrs::gettext;
 use gtk::gio;
@@ -15,16 +17,38 @@ const FORMATS: &[(&str, OutputFormat)] = &[
     ("png", OutputFormat::Png),
 ];
 
-/// The app's settings. Panics with a clear message if the schema is not
-/// installed, because GLib would abort without one.
+/// Test hook: points the dev schema lookup at another folder, so a test
+/// can hide the dev schema. Not for users.
+pub const DEV_SCHEMA_DIR_ENV: &str = "SAFE_UPLOAD_DEV_SCHEMA_DIR";
+
+/// The message `run` prints when `schema` finds nothing.
+pub const MISSING: &str = "the GSettings schema is not installed";
+
+/// The app's settings schema. Looks in the default places first (an
+/// installed or Flatpak build always finds it there). Then, for a dev
+/// build, in the folder `build.rs` compiled `data/` into. That path is in
+/// the build tree, so it does not exist on an installed system.
+pub fn schema() -> Option<gio::SettingsSchema> {
+    let dev = std::env::var_os(DEV_SCHEMA_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("SAFE_UPLOAD_DEV_SCHEMA_DIR")));
+    find(gio::SettingsSchemaSource::default(), &dev)
+}
+
+fn find(default: Option<gio::SettingsSchemaSource>, dev: &Path) -> Option<gio::SettingsSchema> {
+    if let Some(s) = default.as_ref().and_then(|s| s.lookup(APP_ID, true)) {
+        return Some(s);
+    }
+    gio::SettingsSchemaSource::from_directory(dev, None, false)
+        .ok()?
+        .lookup(APP_ID, false)
+}
+
+/// The app's settings. `run` checks `schema` before the app starts, so
+/// this does not fail there.
 pub fn load() -> gio::Settings {
-    let found = gio::SettingsSchemaSource::default().and_then(|s| s.lookup(APP_ID, true));
-    assert!(
-        found.is_some(),
-        "the GSettings schema {APP_ID} is not installed; compile data/ with \
-         glib-compile-schemas and set GSETTINGS_SCHEMA_DIR"
-    );
-    gio::Settings::new(APP_ID)
+    let schema = schema().unwrap_or_else(|| panic!("{MISSING}: {APP_ID}"));
+    gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None)
 }
 
 /// The prepare options the settings ask for.
@@ -115,4 +139,23 @@ pub fn panel(settings: &gio::Settings) -> adw::PreferencesPage {
 /// Gives every change to the settings to `apply`.
 pub fn on_change(settings: &gio::Settings, apply: impl Fn(Options) + 'static) {
     settings.connect_changed(None, move |s, _| apply(options(s)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_build_finds_compiled_schema_without_default_source() {
+        let dev = Path::new(env!("SAFE_UPLOAD_DEV_SCHEMA_DIR"));
+        let schema = find(None, dev).expect("dev schema");
+        assert_eq!(schema.id(), APP_ID);
+        assert!(schema.has_key("max-size"));
+    }
+
+    #[test]
+    fn empty_dev_dir_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find(None, dir.path()).is_none());
+    }
 }
