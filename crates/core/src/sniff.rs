@@ -37,13 +37,18 @@ pub fn sniff(head: &[u8]) -> Result<(), Error> {
     }
     let declared = u32::from_be_bytes(head[0..4].try_into().unwrap()) as usize;
     let (brands_start, box_end) = match declared {
-        0 => (8, head.len()),
+        0 => (8, head.len().max(16)),
         1 => match head.get(8..16) {
             Some(large) => (16, u64::from_be_bytes(large.try_into().unwrap()) as usize),
             None => return Err(Error::UnsupportedFormat(Format::Heif)),
         },
         n => (8, n),
     };
+    // A box too small for the major brand and minor version is malformed.
+    // Treat it as HEIF, so it is refused before any decoder sees it.
+    if box_end < brands_start + 8 {
+        return Err(Error::UnsupportedFormat(Format::Heif));
+    }
     let truncated = box_end > head.len();
     let ftyp = &head[..box_end.min(head.len())];
 
@@ -138,15 +143,17 @@ mod tests {
     }
 
     #[test]
-    fn odd_box_sizes_do_not_panic() {
-        for size in [0u32, 1, 2, 7, 8, 9, 15, 16, 17, u32::MAX] {
+    fn odd_box_sizes_are_refused_without_panic() {
+        for size in [0u32, 1, 2, 7, 8, 9, 11, 15, 16, 17, u32::MAX] {
             let mut v = ftyp(b"heic", &[b"mif1"]);
             v[0..4].copy_from_slice(&size.to_be_bytes());
-            let _ = sniff(&v);
+            assert!(refused(&v), "size {size}");
         }
-        let mut large = ftyp(b"heic", &[]);
-        large[0..4].copy_from_slice(&1u32.to_be_bytes());
-        large.splice(8..8, 24u64.to_be_bytes());
-        assert!(refused(&large));
+        for large_size in [0u64, 1, 8, 15, 16, 23, 24, 28, u64::MAX] {
+            let mut large = ftyp(b"heic", &[b"mif1"]);
+            large[0..4].copy_from_slice(&1u32.to_be_bytes());
+            large.splice(8..8, large_size.to_be_bytes());
+            assert!(refused(&large), "largesize {large_size}");
+        }
     }
 }
