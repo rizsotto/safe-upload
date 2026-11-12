@@ -8,6 +8,9 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use image::{RgbaImage, imageops};
+
+use crate::color::SourceColor;
 use crate::decode::{Decoder, GlycinDecoder};
 use crate::encode::{Encoder, JpegEncoder, OutputProfile, Pixels, PngEncoder};
 use crate::output::{PrivateDir, neutral_name};
@@ -69,18 +72,14 @@ pub fn prepare_with(
     decoder: &dyn Decoder,
     encoder_for: EncoderFor<'_>,
 ) -> Result<Prepared, Error> {
-    sniff::check_file(input)?;
-
-    // 1. Decode in the sandbox.
-    let decoded = decoder.decode(input, limits)?;
-    let input_size = decoded.pixels.dimensions();
+    // 1. and 2.
+    let upright = decode_upright(input, limits, decoder)?;
+    let input_size = upright.stored_size;
     let (input_bytes, removed) = scan_input(input, limits)?;
-    // 2. Orientation, before the metadata is gone (FR-2).
-    let image = orient::apply(decoded.pixels, decoded.orientation);
     // 3. and 4. Crop, then burn in the redactions (FR-5).
-    let image = edit::apply(image, opts.crop, &opts.redactions)?;
+    let image = edit::apply(upright.image, opts.crop, &opts.redactions)?;
     // 5. Convert to sRGB; the source profile is dropped here.
-    let image = color::to_srgb(image, decoded.color.as_ref())?;
+    let image = color::to_srgb(image, upright.color.as_ref())?;
     // 6. Fit-to-size encode.
     let px = Pixels::new(image, OUTPUT_PROFILE);
     let format = choose_format(opts.format, px.has_alpha);
@@ -107,6 +106,74 @@ pub fn prepare_with(
             removed,
         },
     })
+}
+
+/// What the editor shows: the oriented sRGB pixels, downscaled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    /// Long edge at most the asked `max_edge`; never upscaled.
+    pub pixels: RgbaImage,
+    /// The oriented size at full resolution. Edit coordinates are in
+    /// this size (SPEC 9.4).
+    pub full_size: (u32, u32),
+}
+
+/// SPEC 9.1 steps 1, 2 and 5 with the glycin decoder: the same decode,
+/// orientation and color conversion as [`prepare`], then a downscale. No
+/// encode, and no file is written.
+pub fn preview(input: &Path, limits: &Limits, max_edge: u32) -> Result<Preview, Error> {
+    preview_with(input, limits, max_edge, &GlycinDecoder)
+}
+
+/// [`preview`] with a chosen decoder.
+pub fn preview_with(
+    input: &Path,
+    limits: &Limits,
+    max_edge: u32,
+    decoder: &dyn Decoder,
+) -> Result<Preview, Error> {
+    let upright = decode_upright(input, limits, decoder)?;
+    let image = color::to_srgb(upright.image, upright.color.as_ref())?;
+    let full_size = image.dimensions();
+    Ok(Preview {
+        pixels: downscale(image, max_edge),
+        full_size,
+    })
+}
+
+/// Steps 1 and 2, shared by [`prepare_with`] and [`preview_with`] so the
+/// preview and the output are always oriented the same way.
+struct Upright {
+    image: RgbaImage,
+    stored_size: (u32, u32),
+    color: Option<SourceColor>,
+}
+
+fn decode_upright(input: &Path, limits: &Limits, decoder: &dyn Decoder) -> Result<Upright, Error> {
+    sniff::check_file(input)?;
+    // 1. Decode in the sandbox.
+    let decoded = decoder.decode(input, limits)?;
+    let stored_size = decoded.pixels.dimensions();
+    // 2. Orientation, before the metadata is gone (FR-2).
+    let image = orient::apply(decoded.pixels, decoded.orientation);
+    Ok(Upright {
+        image,
+        stored_size,
+        color: decoded.color,
+    })
+}
+
+fn downscale(image: RgbaImage, max_edge: u32) -> RgbaImage {
+    let (w, h) = image.dimensions();
+    let max_edge = max_edge.max(1);
+    let long = w.max(h);
+    if long <= max_edge {
+        return image;
+    }
+    let scale = |n: u32| {
+        ((u64::from(n) * u64::from(max_edge) + u64::from(long) / 2) / u64::from(long)).max(1) as u32
+    };
+    imageops::thumbnail(&image, scale(w), scale(h))
 }
 
 /// Auto keeps real transparency as PNG (SPEC 4, 9.3). Everything else
@@ -148,6 +215,16 @@ fn verify_file(path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downscale_keeps_the_aspect_and_never_upscales() {
+        let size = |w, h, edge| downscale(RgbaImage::new(w, h), edge).dimensions();
+        assert_eq!(size(4000, 3000, 2048), (2048, 1536));
+        assert_eq!(size(3000, 4000, 2048), (1536, 2048));
+        assert_eq!(size(100, 50, 2048), (100, 50));
+        assert_eq!(size(5000, 1, 100), (100, 1));
+        assert_eq!(size(10, 10, 0), (1, 1));
+    }
 
     #[test]
     fn auto_keeps_alpha_as_png() {
