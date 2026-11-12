@@ -125,6 +125,24 @@ Same photos scaled to 12 MP, fit only, median of 3 runs on 6 photos:
 and 1.45 s (up to 5.2 s). The 2.6 s case is night-chateau: its one quality
 92 encode alone takes that long under load.
 
+### Whole CLI, release build
+
+`safe-upload --max-size` on a real 12.2 MP camera JPEG (night-city) and a
+24 MP one (landscape-gorge), this branch against M1 (commit 158c3fa),
+6 interleaved runs each, same machine. The load average was 32 to 36, so
+the fastest run is the fairest number; all runs are in the scratch data.
+
+| Photo | Target | New, fastest (all runs) | M1, fastest (all runs) |
+|---|---|---|---|
+| night-city, 12 MP | 5 MB | 1.55 s (1.55 to 2.97) | 1.76 s (1.76 to 2.88) |
+| night-city, 12 MP | 2 MB | 1.49 s (1.49 to 2.61) | 2.53 s (2.53 to 5.31) |
+| landscape-gorge, 24 MP | 5 MB | 3.47 s (3.47 to 5.00) | 7.31 s (7.31 to 10.58) |
+| landscape-gorge, 24 MP | 2 MB | 2.32 s (2.32 to 3.35) | 6.23 s (6.23 to 7.85) |
+
+The CLI time includes the sandboxed decode, the input scan, writing and
+verifying the output. These numbers should be measured again on an idle
+machine before NFR-1 is called met.
+
 ## Options
 
 ### A. Keep the search, start it from a predicted bracket
@@ -135,7 +153,7 @@ because the bracket needs a point on each side.
 ### B. Predict from a tile mosaic, encode once, correct with the measured ratio (built)
 Build a mosaic of 8x8 tiles of 64 px, one from the middle of each cell of
 an 8x8 grid, at the output scale. Binary-search the quality on the mosaic
-(about 2 to 9 encodes of 0.26 MP, 20 to 100 ms). Predict the full size as
+(about 2 to 12 encodes of 0.26 MP, 20 to 130 ms). Predict the full size as
 header bytes plus mosaic bytes times the pixel ratio. Aim at 95% of the
 target. If even quality 40 is predicted too big, shrink the scale by the
 1.7 power law and sample again. Encode the full image once. If it is over
@@ -146,7 +164,7 @@ are their own sample, so their sample encode is the output.
 Pros: one full encode in 72 of 80 cases, two in the rest, never more.
 Never over target. Simple: one loop, no parallel threads. Works for PNG
 too (the correction handles PNG's flatter size curve).
-Cons: the sample work is sequential (about 2 to 9 small encodes). The
+Cons: the sample work is sequential (about 2 to 12 small encodes). The
 prediction error is larger for big flat areas and grid-like documents, which
 costs a second encode there.
 
@@ -168,7 +186,8 @@ encode, and the end-to-end test needs one full encode in 90% of cases and
 never more than two. The hard rule holds: the loop only returns an encode
 that it measured to be within the target. SPEC 9.3 is updated to match.
 
-NFR-1 is close but not always met: with one encode left, the time is
+NFR-1 is close but not always met: the 12 MP photo took 1.5 s at best
+for both 5 MB and 2 MB on a busy machine. With one encode left, the time is
 decode plus one mozjpeg encode at the chosen quality. For very detailed or
 noisy 12 MP photos at quality 92, that encode alone takes 1.5 s or more.
 A follow-up could measure on a quiet machine, and look at trellis
@@ -179,7 +198,7 @@ question from this record.
 
 - Raw data (CSV, not in the repo): photos.csv (per-photo features and
   timings), sizes.csv (full encodes), samples.csv (sample encodes),
-  eval-g8.csv and eval-12mp*.csv (end-to-end runs).
+  eval-g8.csv and eval-12mp*.csv (end-to-end runs), cli-times.txt.
 - Wikimedia Commons file pages listed above, all CC0.
 - mozjpeg 0.10.13 (mozjpeg-sys 2.2.3), image 0.25.10, as in `Cargo.lock`.
 
