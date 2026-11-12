@@ -3,6 +3,7 @@
 mod error;
 mod limits;
 mod options;
+pub mod output;
 pub mod sniff;
 
 pub use error::Error;

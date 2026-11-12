@@ -11,6 +11,10 @@ pub enum Error {
     FileTooLarge { bytes: u64, limit: u64 },
     #[error("{0} images are not supported in this version")]
     UnsupportedFormat(crate::Format),
+    #[error("XDG_RUNTIME_DIR is not set or not usable")]
+    NoRuntimeDir,
+    #[error("the private temporary folder is not safe to use")]
+    UnsafeTempDir,
     #[error("input/output error: {0}")]
     Io(#[from] std::io::Error),
 }
