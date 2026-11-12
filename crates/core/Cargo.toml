@@ -9,6 +9,7 @@ publish.workspace = true
 getrandom = "0.3"
 glycin = "4"
 image = { version = "0.25", default-features = false }
+lcms2 = "6"
 miniz_oxide = "0.8"
 thiserror = "2"
 

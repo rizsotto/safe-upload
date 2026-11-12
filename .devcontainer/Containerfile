@@ -9,6 +9,9 @@ RUN dnf -y install gcc git sudo && dnf clean all
 RUN dnf -y install glycin-loaders bubblewrap glib2-devel fontconfig-devel \
         libseccomp-devel pkgconf-pkg-config && dnf clean all
 
+# Color conversion (lcms2).
+RUN dnf -y install lcms2-devel && dnf clean all
+
 # Test fixtures (tests/fixtures/make.sh).
 RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress && dnf clean all
 

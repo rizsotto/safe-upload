@@ -15,6 +15,8 @@ pub enum Error {
     NoRuntimeDir,
     #[error("the private temporary folder is not safe to use")]
     UnsafeTempDir,
+    #[error("color conversion failed: {0}")]
+    Color(&'static str),
     #[error("output check failed: {0}")]
     Verify(String),
     #[error("input/output error: {0}")]
