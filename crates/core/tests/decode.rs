@@ -5,7 +5,7 @@ mod common;
 use common::fixtures;
 use safe_upload_core::color::{self, SourceColor};
 use safe_upload_core::decode::{Decoder, GlycinDecoder};
-use safe_upload_core::{Error, Format, Limits, Orientation, orient};
+use safe_upload_core::{Error, Limits, Orientation, orient};
 
 fn decode(name: &str) -> Result<safe_upload_core::decode::Decoded, Error> {
     GlycinDecoder.decode(&fixtures().join(name), &Limits::default())
@@ -116,11 +116,38 @@ fn truncated_files_give_a_decode_error() {
 }
 
 #[test]
-fn heif_never_reaches_the_decoder() {
-    assert!(matches!(
-        decode("heif-header.heic"),
-        Err(Error::UnsupportedFormat(Format::Heif))
-    ));
+fn heic_decodes_in_the_sandbox() {
+    // GlycinDecoder fails unless the loader ran in bwrap.
+    let d = decode("heic-gps.heic").unwrap();
+    assert_eq!(d.pixels.dimensions(), (640, 480));
+    // A red to blue gradient from top to bottom.
+    let (top, bottom) = (d.pixels.get_pixel(320, 5), d.pixels.get_pixel(320, 474));
+    assert!(top[0] > 200 && top[2] < 60, "{top:?}");
+    assert!(bottom[2] > 200 && bottom[0] < 60, "{bottom:?}");
+}
+
+#[test]
+fn heic_rotation_is_applied_once() {
+    let d = decode("heic-rot90.heic").unwrap();
+    let upright = orient::apply(d.pixels, d.orientation);
+    assert_eq!(upright.dimensions(), (480, 640));
+    // Red quadrant top-right, blue elsewhere.
+    for ((x, y), red) in [
+        ((360, 160), true),
+        ((120, 160), false),
+        ((120, 480), false),
+        ((360, 480), false),
+    ] {
+        let p = upright.get_pixel(x, y);
+        assert_eq!(p[0] > 200 && p[2] < 60, red, "{x},{y}: {p:?}");
+        assert_eq!(p[2] > 200 && p[0] < 60, !red, "{x},{y}: {p:?}");
+    }
+}
+
+#[test]
+fn header_only_heif_is_a_decode_error() {
+    let err = decode("heif-header.heic").unwrap_err();
+    assert!(matches!(err, Error::Decode(_)), "{err}");
 }
 
 #[test]

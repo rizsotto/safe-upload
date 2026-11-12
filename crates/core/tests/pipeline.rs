@@ -52,6 +52,8 @@ fn every_fixture_prepares() {
         ("rgb.avif", "jpg"),
         ("alpha.avif", "png"),
         ("p3-nclx.avif", "jpg"),
+        ("heic-gps.heic", "jpg"),
+        ("heic-rot90.heic", "jpg"),
     ]
     .into_iter()
     .map(|(n, e)| (n.to_string(), e))
@@ -86,6 +88,20 @@ fn orientation_6_swaps_the_size() {
 }
 
 #[test]
+fn heic_rotation_swaps_the_size() {
+    let dir = private_dir("heic-rot90");
+    let p = prepare(
+        &fixtures().join("heic-rot90.heic"),
+        &Options::new(1_000_000),
+        one(&dir),
+    )
+    .unwrap();
+    // glycin applies the irot box while decoding.
+    assert_eq!(p.summary.input_size, (480, 640));
+    assert_eq!(p.summary.output_size, (480, 640));
+}
+
+#[test]
 fn bad_inputs_leave_no_file() {
     for (i, name) in [
         "heif-header.heic",
@@ -100,34 +116,32 @@ fn bad_inputs_leave_no_file() {
         let err =
             prepare(&fixtures().join(name), &Options::new(1_000_000), one(&dir)).expect_err(name);
         if name == "heif-header.heic" {
-            assert!(
-                matches!(err, Error::UnsupportedFormat(Format::Heif)),
-                "{err}"
-            );
+            assert!(matches!(err, Error::Decode(_)), "{err}");
         }
         assert!(files_in(dir.path()).is_empty(), "{name}");
     }
 }
 
 #[test]
-fn heif_is_refused_before_the_decoder_runs() {
-    struct Panics;
-    impl safe_upload_core::decode::Decoder for Panics {
+fn missing_decoder_is_passed_on_and_leaves_no_file() {
+    struct NoCodec;
+    impl safe_upload_core::decode::Decoder for NoCodec {
         fn decode(&self, _: &Path, _: &Limits) -> Result<safe_upload_core::decode::Decoded, Error> {
-            panic!("the decoder must not see a HEIF file");
+            Err(Error::MissingDecoder(Format::Heif))
         }
     }
-    let dir = private_dir("heif-first");
+    let dir = private_dir("heif-no-codec");
     let err = prepare_with(
-        &fixtures().join("heif-header.heic"),
+        &fixtures().join("heic-gps.heic"),
         &Options::new(1_000_000),
         one(&dir),
         &Limits::default(),
-        &Panics,
+        &NoCodec,
         &default_encoder,
     )
     .unwrap_err();
-    assert!(matches!(err, Error::UnsupportedFormat(Format::Heif)));
+    assert!(matches!(err, Error::MissingDecoder(Format::Heif)), "{err}");
+    assert!(files_in(dir.path()).is_empty());
 }
 
 /// Adds an APP1 Exif segment after SOI, like an encoder that leaks.

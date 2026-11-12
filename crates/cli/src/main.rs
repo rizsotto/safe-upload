@@ -1,7 +1,8 @@
 //! `safe-upload`: prepare images for upload from the command line.
 //!
 //! Exit codes (M1 plan): 0 success, 1 any other error, 2 usage error,
-//! 3 input format not supported in this build (HEIC/HEIF in M1).
+//! 3 input format not supported in this build, or its decoder is not
+//! installed (HEIC without an HEVC decoder).
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -66,15 +67,15 @@ fn main() -> ExitCode {
 /// Never prints the path (S-5).
 fn fail(n: usize, e: &Error) -> u8 {
     match e {
-        Error::UnsupportedFormat(Format::Heif) => {
+        Error::MissingDecoder(Format::Heif) => {
             eprintln!(
-                "Input {n} is a HEIC/HEIF image. This version of safe-upload cannot read \
-                 HEIC yet. Convert it to JPEG or PNG first, then try again. On an iPhone, \
-                 Settings > Camera > Formats > Most Compatible saves new photos as JPEG."
+                "Input {n}: this HEIC image needs an HEVC decoder, which is not installed. \
+                 On Fedora, install libheif-freeworld from RPM Fusion. In the Flatpak, \
+                 install the org.freedesktop.Platform.codecs-extra extension."
             );
             EXIT_UNSUPPORTED
         }
-        Error::UnsupportedFormat(_) => {
+        Error::UnsupportedFormat(_) | Error::MissingDecoder(_) => {
             eprintln!("safe-upload: input {n}: {e}");
             EXIT_UNSUPPORTED
         }

@@ -14,12 +14,9 @@ const HEIF_HEADER: &[u8] = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic";
 const JPEG_START: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0, 16, b'J', b'F', b'I', b'F', 0];
 
 #[test]
-fn heif_header_named_jpg_is_refused() {
+fn heif_is_no_longer_refused() {
     let path = write("photo.jpg", HEIF_HEADER);
-    assert!(matches!(
-        sniff::check_file(&path),
-        Err(Error::UnsupportedFormat(Format::Heif))
-    ));
+    assert!(sniff::check_file(&path).is_ok());
 }
 
 #[test]
@@ -38,4 +35,6 @@ fn missing_file_is_an_io_error() {
 fn message_says_what_format() {
     let msg = Error::UnsupportedFormat(Format::Heif).to_string();
     assert!(msg.contains("HEIC/HEIF"), "{msg}");
+    let msg = Error::MissingDecoder(Format::Heif).to_string();
+    assert_eq!(msg, "no decoder for HEIC/HEIF images is installed");
 }

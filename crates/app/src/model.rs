@@ -16,7 +16,7 @@ use gtk::gio;
 use gtk::gio::prelude::*;
 use gtk::glib;
 use safe_upload_core::output::{PrivateDir, file_name};
-use safe_upload_core::{Error, Options, Target, prepare};
+use safe_upload_core::{Error, Format, Options, Target, prepare};
 
 use crate::item::{ImageItem, Output};
 
@@ -229,6 +229,11 @@ fn work(path: &Path, options: &Options) -> Result<Output, String> {
 pub fn row_error(e: &Error) -> String {
     match e {
         Error::Decode(_) => gettext("Not a supported image"),
+        Error::MissingDecoder(Format::Heif) => gettext(
+            "This HEIC image needs an HEVC decoder, which is not installed. \
+             On Fedora, install libheif-freeworld from RPM Fusion. In the Flatpak, \
+             install the org.freedesktop.Platform.codecs-extra extension.",
+        ),
         Error::CannotFit { .. } => format!(
             "{}. {}",
             capitalize(&e.to_string()),
@@ -288,6 +293,14 @@ mod tests {
             row_error(&Error::Sandbox("the decoder did not run in the sandbox")),
             "The image decoder could not run in its sandbox: \
              the decoder did not run in the sandbox"
+        );
+        assert!(
+            row_error(&Error::MissingDecoder(Format::Heif))
+                .starts_with("This HEIC image needs an HEVC decoder, which is not installed.")
+        );
+        assert_eq!(
+            row_error(&Error::MissingDecoder(Format::Avif)),
+            "No decoder for AVIF images is installed"
         );
         assert_eq!(
             row_error(&Error::CannotFit { target_bytes: 1000 }),

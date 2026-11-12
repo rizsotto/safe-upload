@@ -285,3 +285,103 @@ fn stale_private_folders_are_removed_on_start() {
     assert!(!old.exists());
     assert!(young.join("image.jpg").exists());
 }
+
+/// Where Fedora keeps the libheif codec plugins.
+const HEIF_PLUGINS: &str = "/usr/lib64/libheif";
+
+/// Runs the CLI with every libheif plugin hidden: a private mount
+/// namespace (`unshare -rm`) with an empty tmpfs over the plugin folder.
+/// glycin's bwrap still runs inside it (M2 plan, "Decoder missing").
+fn without_heif_plugins(env: &Env, args: &[&std::ffi::OsStr]) -> std::process::Output {
+    let script = format!("mount -t tmpfs none {HEIF_PLUGINS} && exec \"$0\" \"$@\"");
+    std::process::Command::new("unshare")
+        .args([
+            "-rm",
+            "sh",
+            "-c",
+            &script,
+            env!("CARGO_BIN_EXE_safe-upload"),
+        ])
+        .args(args)
+        .env("XDG_RUNTIME_DIR", env.runtime.path())
+        .current_dir(env.work.path())
+        .output()
+        .expect("unshare is in the devcontainer")
+}
+
+#[test]
+fn heic_without_decoder_exits_3() {
+    let plugins = fs::read_dir(HEIF_PLUGINS)
+        .unwrap_or_else(|e| panic!("{HEIF_PLUGINS}: {e}"))
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    assert!(
+        plugins
+            .iter()
+            .any(|p| p.contains("libde265") || p.contains("ffmpegdec")),
+        "no HEVC decoder plugin in {HEIF_PLUGINS}: {plugins:?}"
+    );
+    let env = Env::new();
+
+    // The setup itself works: a JPEG still decodes in bwrap.
+    let jpeg = fixture("exif-gps-thumb.jpg");
+    let out = without_heif_plugins(
+        &env,
+        &[
+            jpeg.as_os_str(),
+            "--max-size".as_ref(),
+            "2MB".as_ref(),
+            "-o".as_ref(),
+            "ok.jpg".as_ref(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::remove_file(env.work.path().join("ok.jpg")).unwrap();
+
+    let heic = fixture("heic-gps.heic");
+    let out = without_heif_plugins(
+        &env,
+        &[
+            heic.as_os_str(),
+            "--max-size".as_ref(),
+            "5MB".as_ref(),
+            "-o".as_ref(),
+            "out.jpg".as_ref(),
+        ],
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("needs an HEVC decoder, which is not installed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("libheif-freeworld"), "{stderr}");
+    assert!(!stderr.contains("heic-gps"), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert!(!env.work.path().join("out.jpg").exists());
+    assert_eq!(env.private_files(), 0);
+
+    // AVIF needs a libheif plugin too; its message names AVIF, not HEVC.
+    let avif = fixture("rgb.avif");
+    let out = without_heif_plugins(
+        &env,
+        &[
+            avif.as_os_str(),
+            "--max-size".as_ref(),
+            "5MB".as_ref(),
+            "-o".as_ref(),
+            "out.jpg".as_ref(),
+        ],
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("no decoder for AVIF images is installed"),
+        "{stderr}"
+    );
+    assert!(!env.work.path().join("out.jpg").exists());
+}
