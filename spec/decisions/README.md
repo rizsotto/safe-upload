@@ -24,3 +24,4 @@ Open a record when the milestone that needs the answer starts.
 | 16.5 | Register the standalone app as a "Share" target in Files? | pending, blocks M2 |
 | 16.6 | Edit `portals.conf` for the user (diff and undo), or only show instructions? | pending, blocks M3 |
 | 16.7 | First-time behavior per app: ask (proposed), or off? | pending, blocks M3 |
+| 16.8 | "No D-Bus" in core allows glycin's peer-to-peer zbus channel to its loaders (SPEC 14 proposal) | awaiting human OK. M1 goes on with glycin meanwhile |

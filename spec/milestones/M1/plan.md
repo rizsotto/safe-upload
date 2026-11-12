@@ -14,7 +14,7 @@ Status: draft. Review before tasks start.
 | Module | Job | SPEC |
 |---|---|---|
 | `options` | `Options`, `OutputFormat`, size parsing (`2MB`) | FR-3 |
-| `limits` | Max 200 MP, max file size, decode timeout | S-4 |
+| `limits` | Max 200 MP, max file size 200 MB, decode timeout 30 s (T03 defaults, not from SPEC; change if needed) | S-4 |
 | `sniff` | Detect HEIC/HEIF by content and refuse it, before decode | UC-4, S-6, decision 0001 |
 | `decode` | Untrusted file to `Decoded` | 9.1.1, NFR-2 |
 | `orient` | Apply EXIF orientation 1 to 8 to pixels | FR-2 |
@@ -73,6 +73,14 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
 - **Verify in Rust, not exiftool.** `verify` walks JPEG markers and PNG
   chunks with an allow list (JPEG: SOI, DQT, SOF, DHT, SOS, DRI, EOI, APP0
   JFIF, APP2 ICC; PNG: IHDR, PLTE, tRNS, IDAT, IEND, iCCP, sRGB, gAMA, cHRM).
+  `verify(bytes, expected_icc)`: an ICC profile must equal `expected_icc`
+  byte for byte (our minimal sRGB profile, SPEC 9.1.5) or be absent. JPEG
+  ICC chunks must come before SOF and join by sequence number; PNG iCCP
+  must come before PLTE and IDAT. DQT, DHT, SOF, SOS and DRI must have no
+  padding. PNG chunks have exact sizes, a fixed order and a checked CRC.
+  Not checked: the entropy-coded JPEG data and the IDAT content are not
+  decoded, so data hidden inside them would pass. They come from our own
+  encoder, which only gets pixels (SPEC 8).
   exiftool is used only in tests.
 - **HEIC/HEIF is refused in M1** (decision 0001). `sniff` reads the first
   box of the file, never the name. It is HEIF if bytes 4..8 are `ftyp`. Then
@@ -138,8 +146,9 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
   0001: M1 refuses HEIC, M2 adds decoding with RPM Fusion in dev and CI.
 - glycin's bwrap works in our rootless podman devcontainer with the current
   `runArgs` (decision 0001, section 4, confirmed in T05). It may be blocked
-  on GitHub runners. T05 forces `SandboxSelector::Bwrap`, so CI fails
-  rather than passing with the sandbox off. The CI job runs its container
+  on GitHub runners. The T05 test forces `SandboxSelector::Bwrap`, and T06
+  must do the same in the core decoder, so CI fails rather than passing
+  with the sandbox off. The CI job runs its container
   with `seccomp=unconfined` and `apparmor=unconfined` and sets
   `kernel.apparmor_restrict_unprivileged_userns=0` on the runner. Not yet
   seen on a GitHub runner: check the first CI run. If bwrap still fails

@@ -332,7 +332,7 @@ safe-upload/
 - If no HEVC decoder is present at runtime (for example a host install without RPM Fusion, or a Flatpak without the `codecs-extra` extension), the user gets a clear message and the CLI exits with code 3. Never a crash or a raw library error.
 - Every test runs in CI. None is skipped, ignored or silently degraded.
 - **Open items (resolve at the start of M2, do not guess):**
-  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. Partly settled in M1 T05: core forces `SandboxSelector::Bwrap` on the host, so decoding fails instead of running unsandboxed, and CI fails with it. Checked locally: under a Docker-like seccomp profile bwrap cannot create namespaces and the T05 test fails. CI turns off seccomp and AppArmor confinement for the job container and allows unprivileged user namespaces on the runner (`.github/ci/devcontainer.json`, `.github/workflows/ci.yml`). Not verified on a GitHub runner yet; check the first CI run. If bwrap still cannot run there, open a decision record. In Flatpak (M2) core must select `FlatpakSpawn` instead.
+  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. Partly settled in M1 T05: the T05 test forces `SandboxSelector::Bwrap`, so it fails instead of decoding unsandboxed. M1 T06 must make the core decoder do the same, so decoding and CI fail when bwrap cannot run. Checked locally: under a Docker-like seccomp profile bwrap cannot create namespaces and the T05 test fails. CI turns off seccomp and AppArmor confinement for the job container and allows unprivileged user namespaces on the runner (`.github/ci/devcontainer.json`, `.github/workflows/ci.yml`). Not verified on a GitHub runner yet; check the first CI run. If bwrap still cannot run there, open a decision record. In Flatpak (M2) core must select `FlatpakSpawn` instead.
   - Not verified: the GNOME runtime decodes HEIC through glycin's `flatpak-spawn --sandbox` subsandbox with `codecs-extra`. If it does not, HEIC stays refused in the Flatpak and a new decision record is needed.
   - How to test "decoder missing" end to end in CI, where the decoder is installed. A fake `Decoder` covers the error mapping. An end-to-end check (for example an empty libheif plugin path) is not verified.
   - How to make a HEIC fixture with a rotation (`irot`) to test "upright". Not yet known.
@@ -375,6 +375,7 @@ safe-upload/
 
 - Work milestone by milestone. Do not start M3 before M1 passes.
 - Keep `core` free of GTK and D-Bus. It must build and test with `cargo test -p safe-upload-core` alone.
+  - Proposed clarification (awaiting human OK, see 16.8): core makes no bus connection and has no direct `zbus` dependency. glycin's private peer-to-peer channel to its sandboxed loaders (zbus over a socket pair, no bus daemon) is allowed.
 - Write a test that fails first for every leak or bug you fix.
 - Do not add network dependencies (S-3).
 - Prefer small pull requests (under about 400 changed lines) with a clear description.
@@ -409,6 +410,7 @@ safe-upload/
 5. Should the standalone app also register as a "Share" target in Files?
 6. Should the standalone app edit `portals.conf` for the user (with a diff and an undo), or only show instructions?
 7. First-time behavior per app: ask (proposed), or off until the user enables it?
+8. Accept the "no D-Bus" clarification in section 14? glycin talks to its loaders with zbus peer-to-peer over a socket pair; core itself makes no bus connection. Awaiting human OK. Until then M1 uses glycin as planned (M1 T05).
 
 Decided: HEIC decoding moves to M2; M1 refuses HEIC. See [decision 0001](decisions/0001-heic-decoding-and-fixtures.md).
 
