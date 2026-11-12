@@ -17,6 +17,8 @@ pub enum Error {
     UnsafeTempDir,
     #[error("color conversion failed: {0}")]
     Color(&'static str),
+    #[error("encoding failed: {0}")]
+    Encode(&'static str),
     #[error("output check failed: {0}")]
     Verify(String),
     #[error("input/output error: {0}")]

@@ -9,7 +9,7 @@ RUN dnf -y install gcc git sudo && dnf clean all
 RUN dnf -y install glycin-loaders bubblewrap glib2-devel fontconfig-devel \
         libseccomp-devel pkgconf-pkg-config && dnf clean all
 
-# Color conversion (lcms2).
+# Color conversion (lcms2) and the JPEG encoder (mozjpeg SIMD needs nasm).
 RUN dnf -y install lcms2-devel && dnf clean all
 
 # Test fixtures (tests/fixtures/make.sh).
