@@ -18,6 +18,12 @@ RUN dnf -y install nasm && dnf clean all
 RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress libavif-tools \
         && dnf clean all
 
+# GTK app and editor widget, headless UI tests (weston, D-Bus, AT-SPI) and
+# data file validators (M2 plan, "Testing GTK headless").
+RUN dnf -y install gtk4-devel libadwaita-devel weston dbus-daemon at-spi2-core \
+        python3-pyatspi glib2-devel desktop-file-utils appstream \
+        && dnf clean all
+
 ARG USERNAME=dev
 ARG USER_UID=1000
 RUN useradd -m -u ${USER_UID} -s /bin/bash ${USERNAME} \

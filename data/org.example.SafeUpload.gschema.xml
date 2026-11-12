@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <enum id="org.example.SafeUpload.OutputFormat">
+    <value nick="auto" value="0"/>
+    <value nick="jpeg" value="1"/>
+    <value nick="png" value="2"/>
+  </enum>
+  <schema id="org.example.SafeUpload" path="/org/example/SafeUpload/">
+    <key name="max-size" type="t">
+      <default>5000000</default>
+      <summary>Largest output file size in bytes</summary>
+    </key>
+    <key name="max-long-edge" type="u">
+      <default>0</default>
+      <summary>Largest output long edge in pixels, 0 for no limit</summary>
+    </key>
+    <key name="output-format" enum="org.example.SafeUpload.OutputFormat">
+      <default>'auto'</default>
+      <summary>Output format</summary>
+    </key>
+    <key name="keep-names" type="b">
+      <default>false</default>
+      <summary>Keep the original file names instead of neutral names</summary>
+    </key>
+    <key name="window-width" type="i">
+      <default>800</default>
+      <summary>Window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>600</default>
+      <summary>Window height</summary>
+    </key>
+    <key name="is-maximized" type="b">
+      <default>false</default>
+      <summary>Window is maximized</summary>
+    </key>
+  </schema>
+</schemalist>
