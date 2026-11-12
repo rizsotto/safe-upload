@@ -92,7 +92,7 @@ fn resize(px: &Pixels, scale: f64) -> Pixels {
     Pixels {
         image: imageops::resize(&px.image, size(w), size(h), FilterType::Lanczos3),
         has_alpha: px.has_alpha,
-        icc: px.icc.clone(),
+        icc: px.icc,
     }
 }
 

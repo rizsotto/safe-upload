@@ -1,14 +1,37 @@
-//! Encoders (SPEC 8). An encoder gets only sRGB pixels plus an optional
-//! ICC profile, never anything from the source file, so it cannot copy
-//! source metadata (SPEC 8, key rule). Its output passes
-//! [`crate::verify::verify`] with the same profile.
+//! Encoders (SPEC 8). An encoder gets only sRGB pixels plus, optionally,
+//! our own sRGB profile. It cannot get anything from the source file, so
+//! it cannot copy source metadata (SPEC 8, key rule): the types allow no
+//! other profile. Its output passes [`crate::verify::verify`] with the
+//! same profile.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 
 use image::RgbaImage;
 
 use crate::Error;
 use crate::verify::{ICC_PROFILE_NAME, crc32};
+
+/// The only ICC profiles an encoder can embed: our own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputProfile {
+    /// moxcms's sRGB profile (SPEC 9.1 step 5).
+    Srgb,
+}
+
+impl OutputProfile {
+    /// The profile bytes. Pass the same bytes to `verify`.
+    pub fn bytes(self) -> &'static [u8] {
+        static SRGB: OnceLock<Vec<u8>> = OnceLock::new();
+        match self {
+            OutputProfile::Srgb => SRGB.get_or_init(|| {
+                moxcms::ColorProfile::new_srgb()
+                    .encode()
+                    .expect("moxcms encodes its own sRGB profile")
+            }),
+        }
+    }
+}
 
 /// sRGB pixels ready to encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,13 +39,21 @@ pub struct Pixels {
     pub image: RgbaImage,
     /// True if any pixel is not fully opaque.
     pub has_alpha: bool,
-    /// The profile to embed. Only ever our own profile, never the source's.
-    pub icc: Option<Vec<u8>>,
+    /// The profile to embed, if any.
+    pub icc: Option<OutputProfile>,
 }
 
 impl Pixels {
-    pub fn new(image: RgbaImage, icc: Option<Vec<u8>>) -> Self {
-        let has_alpha = image.pixels().any(|p| p[3] != 255);
+    /// Fully transparent pixels lose their color, so nothing hides there
+    /// and resizing does not bleed it into visible pixels.
+    pub fn new(mut image: RgbaImage, icc: Option<OutputProfile>) -> Self {
+        let mut has_alpha = false;
+        for p in image.pixels_mut() {
+            has_alpha |= p[3] != 255;
+            if p[3] == 0 {
+                p.0 = [0; 4];
+            }
+        }
         Self {
             image,
             has_alpha,
@@ -53,35 +84,7 @@ pub struct PngEncoder;
 
 impl Encoder for JpegEncoder {
     fn encode(&self, px: &Pixels, quality: u8) -> Result<Vec<u8>, Error> {
-        let (w, h) = px.image.dimensions();
-        if w == 0 || h == 0 || w > 65_500 || h > 65_500 {
-            return Err(Error::Encode("image size not possible in JPEG"));
-        }
-        let rgb: Vec<u8> = px
-            .image
-            .pixels()
-            .flat_map(|p| {
-                let a = u16::from(p[3]);
-                let on_white = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
-                [on_white(p[0]), on_white(p[1]), on_white(p[2])]
-            })
-            .collect();
-        let quality = quality.clamp(1, 100);
-        // mozjpeg reports errors by unwinding.
-        catch_unwind(AssertUnwindSafe(|| -> std::io::Result<Vec<u8>> {
-            let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
-            c.set_size(w as usize, h as usize);
-            c.set_quality(f32::from(quality));
-            let mut c = c.start_compress(Vec::new())?;
-            if let Some(icc) = &px.icc {
-                write_jpeg_icc(&mut c, icc);
-            }
-            c.write_scanlines(&rgb)?;
-            c.finish()
-        }))
-        .ok()
-        .and_then(Result::ok)
-        .ok_or(Error::Encode("JPEG encoding failed"))
+        encode_jpeg(&px.image, quality, px.icc.map(OutputProfile::bytes))
     }
 
     fn extension(&self) -> &'static str {
@@ -89,11 +92,51 @@ impl Encoder for JpegEncoder {
     }
 }
 
+/// Most APP2 chunks one ICC profile can use: the count is one byte.
+const MAX_ICC_CHUNKS: usize = 255;
+/// Profile bytes per APP2 chunk: the segment limit minus the length,
+/// the tag and the two numbering bytes.
+const ICC_CHUNK_DATA: usize = 65_535 - 2 - 14;
+
+fn encode_jpeg(image: &RgbaImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec<u8>, Error> {
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 || w > 65_500 || h > 65_500 {
+        return Err(Error::Encode("image size not possible in JPEG"));
+    }
+    if icc.is_some_and(|p| p.is_empty() || p.len().div_ceil(ICC_CHUNK_DATA) > MAX_ICC_CHUNKS) {
+        return Err(Error::Encode("ICC profile size not possible in JPEG"));
+    }
+    let rgb: Vec<u8> = image
+        .pixels()
+        .flat_map(|p| {
+            let a = u16::from(p[3]);
+            let on_white = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+            [on_white(p[0]), on_white(p[1]), on_white(p[2])]
+        })
+        .collect();
+    let quality = quality.clamp(1, 100);
+    // mozjpeg reports errors by unwinding.
+    catch_unwind(AssertUnwindSafe(|| -> std::io::Result<Vec<u8>> {
+        let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        c.set_size(w as usize, h as usize);
+        c.set_quality(f32::from(quality));
+        let mut c = c.start_compress(Vec::new())?;
+        if let Some(icc) = icc {
+            write_jpeg_icc(&mut c, icc);
+        }
+        c.write_scanlines(&rgb)?;
+        c.finish()
+    }))
+    .ok()
+    .and_then(Result::ok)
+    .ok_or(Error::Encode("JPEG encoding failed"))
+}
+
 /// APP2 ICC chunks with 1-based sequence numbers (ICC.1, annex B).
-/// mozjpeg's own `write_icc_profile` numbers them from 0.
+/// mozjpeg's own `write_icc_profile` numbers them from 0. The caller
+/// checks that the profile fits in 255 chunks.
 fn write_jpeg_icc<W>(c: &mut mozjpeg::compress::CompressStarted<W>, icc: &[u8]) {
-    const MAX_DATA: usize = 65_533 - 14;
-    let chunks: Vec<&[u8]> = icc.chunks(MAX_DATA).collect();
+    let chunks: Vec<&[u8]> = icc.chunks(ICC_CHUNK_DATA).collect();
     for (i, chunk) in chunks.iter().enumerate() {
         let mut buf = b"ICC_PROFILE\0".to_vec();
         buf.extend([i as u8 + 1, chunks.len() as u8]);
@@ -144,8 +187,8 @@ impl Encoder for PngEncoder {
         let mut writer = enc.write_header().map_err(failed)?;
         writer.write_image_data(&data).map_err(failed)?;
         writer.finish().map_err(failed)?;
-        match &px.icc {
-            Some(icc) => Ok(insert_iccp(out, icc)),
+        match px.icc {
+            Some(icc) => Ok(insert_iccp(out, icc.bytes())),
             None => Ok(out),
         }
     }
@@ -217,7 +260,7 @@ mod tests {
         })
     }
 
-    /// A stand-in for our profile. Large enough for two JPEG chunks.
+    /// Profile-sized bytes, to test chunking beyond our small profile.
     fn icc(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 251) as u8).collect()
     }
@@ -251,6 +294,17 @@ mod tests {
         sum as f64 / a.len() as f64
     }
 
+    /// mozjpeg-sys silently builds without SIMD when nasm is missing,
+    /// which makes every encode several times slower (NFR-1).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mozjpeg_is_built_with_simd() {
+        unsafe extern "C" {
+            fn jsimd_can_fdct_islow() -> std::ffi::c_int;
+        }
+        assert_eq!(unsafe { jsimd_can_fdct_islow() }, 1, "is nasm installed?");
+    }
+
     #[test]
     fn jpeg_round_trip() {
         let px = Pixels::new(gradient(64, 48, false), None);
@@ -280,13 +334,51 @@ mod tests {
 
     #[test]
     fn jpeg_with_profile_passes_verify_only_with_that_profile() {
-        for len in [500, 70_000] {
+        let srgb = OutputProfile::Srgb.bytes();
+        let px = Pixels::new(gradient(32, 32, false), Some(OutputProfile::Srgb));
+        let out = JpegEncoder.encode(&px, 80).unwrap();
+        verify(&out, Some(srgb)).unwrap();
+        assert!(verify(&out, None).is_err());
+    }
+
+    #[test]
+    fn jpeg_profile_chunks_are_numbered_from_one() {
+        let image = gradient(8, 8, false);
+        for len in [ICC_CHUNK_DATA, ICC_CHUNK_DATA + 1, 3 * ICC_CHUNK_DATA] {
             let profile = icc(len);
-            let px = Pixels::new(gradient(32, 32, false), Some(profile.clone()));
-            let out = JpegEncoder.encode(&px, 80).unwrap();
+            let out = encode_jpeg(&image, 80, Some(&profile)).unwrap();
             verify(&out, Some(&profile)).unwrap();
-            assert!(verify(&out, None).is_err());
         }
+    }
+
+    #[test]
+    fn jpeg_profile_over_255_chunks_is_an_error() {
+        let image = gradient(8, 8, false);
+        let fits = icc(MAX_ICC_CHUNKS * ICC_CHUNK_DATA);
+        let out = encode_jpeg(&image, 80, Some(&fits)).unwrap();
+        verify(&out, Some(&fits)).unwrap();
+        let too_big = icc(MAX_ICC_CHUNKS * ICC_CHUNK_DATA + 1);
+        assert!(matches!(
+            encode_jpeg(&image, 80, Some(&too_big)),
+            Err(Error::Encode(_))
+        ));
+    }
+
+    #[test]
+    fn output_profile_is_srgb_and_stable() {
+        let bytes = OutputProfile::Srgb.bytes();
+        let parsed = moxcms::ColorProfile::new_from_slice(bytes).unwrap();
+        assert_eq!(parsed.color_space, moxcms::DataColorSpace::Rgb);
+        assert_eq!(bytes, moxcms::ColorProfile::new_srgb().encode().unwrap());
+    }
+
+    #[test]
+    fn new_clears_the_color_of_transparent_pixels() {
+        let mut image = RgbaImage::from_pixel(2, 1, Rgba([9, 8, 7, 0]));
+        image.put_pixel(1, 0, Rgba([9, 8, 7, 1]));
+        let px = Pixels::new(image, None);
+        assert_eq!(px.image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(px.image.get_pixel(1, 0).0, [9, 8, 7, 1]);
     }
 
     #[test]
@@ -304,11 +396,7 @@ mod tests {
             assert_eq!(px.has_alpha, alpha);
             let out = PngEncoder.encode(&px, 100).unwrap();
             verify(&out, None).unwrap();
-            let mut want = px.image.clone();
-            want.pixels_mut()
-                .filter(|p| p[3] == 0)
-                .for_each(|p| p.0 = [0; 4]);
-            assert_eq!(decode_png(&out), want);
+            assert_eq!(decode_png(&out), px.image);
         }
     }
 
@@ -332,11 +420,11 @@ mod tests {
 
     #[test]
     fn png_with_profile_passes_verify_only_with_that_profile() {
-        let profile = icc(3000);
+        let srgb = OutputProfile::Srgb.bytes();
         for q in [100, 60] {
-            let px = Pixels::new(gradient(16, 16, true), Some(profile.clone()));
+            let px = Pixels::new(gradient(16, 16, true), Some(OutputProfile::Srgb));
             let out = PngEncoder.encode(&px, q).unwrap();
-            verify(&out, Some(&profile)).unwrap();
+            verify(&out, Some(srgb)).unwrap();
             assert!(verify(&out, None).is_err());
             assert_eq!(
                 decode_png(&out),
