@@ -241,3 +241,47 @@ fn output_file_has_mode_0600() {
         .mode();
     assert_eq!(mode & 0o777, 0o600);
 }
+
+#[test]
+fn impossible_target_gives_a_clear_error() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .arg(fixture("exif-gps-thumb.jpg"))
+        .args(["--max-size", "1KB", "-o", "small.jpg"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr.trim_end(),
+        "safe-upload: input 1: the image cannot be made small enough for 1000 bytes"
+    );
+    assert!(!env.work.path().join("small.jpg").exists());
+}
+
+/// S-2: each run deletes private folders older than one hour.
+#[test]
+fn stale_private_folders_are_removed_on_start() {
+    let env = Env::new();
+    let base = env.runtime.path().join("safe-upload");
+    let old = base.join("0123456789abcdef0123456789abcdef");
+    let young = base.join("fedcba9876543210fedcba9876543210");
+    for dir in [&old, &young] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("image.jpg"), b"x").unwrap();
+    }
+    fs::set_permissions(&base, Permissions::from_mode(0o700)).unwrap();
+    let two_hours = std::time::Duration::from_secs(2 * 60 * 60);
+    fs::File::open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - two_hours)
+        .unwrap();
+    env.cmd()
+        .arg(fixture("p3.jpg"))
+        .args(["--max-size", "1MB", "-o", "out.jpg"])
+        .assert()
+        .success();
+    assert!(!old.exists());
+    assert!(young.join("image.jpg").exists());
+}
