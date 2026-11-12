@@ -257,3 +257,20 @@ fn summary_names_removed_kinds_without_values() {
     .unwrap();
     assert_eq!(p.summary.removed.unwrap(), [ColorProfile]);
 }
+
+/// SPEC 9.1 step 5: P3 input comes out as sRGB, from an ICC profile and
+/// from CICP. The mid-tone P3 rgb(200,120,80) is sRGB rgb(213,115,70).
+#[test]
+fn p3_output_is_converted_to_srgb() {
+    use safe_upload_core::decode::Decoder;
+    for (i, name) in ["p3.jpg", "p3-nclx.avif"].into_iter().enumerate() {
+        let dir = private_dir(&format!("p3-{i}"));
+        let p = prepare(&fixtures().join(name), &Options::new(1_000_000), one(&dir)).unwrap();
+        let out = GlycinDecoder.decode(&p.path, &Limits::default()).unwrap();
+        assert_eq!(out.color, None, "{name}: no profile in the output");
+        let px = out.pixels.get_pixel(48, 16).0;
+        for (got, want) in px.iter().zip([213u8, 115, 70]) {
+            assert!(got.abs_diff(want) <= 6, "{name}: got {px:?}");
+        }
+    }
+}
