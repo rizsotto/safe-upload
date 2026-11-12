@@ -1,7 +1,7 @@
 # Safe Upload
 
 Safe Upload cleans images before you upload them. It removes location, camera
-and other metadata. It shrinks the file to a size you pick, like "under 2 MB".
+and other metadata. It shrinks the file to a size you pick, like "under 5 MB".
 You can paint over parts of the image. The output gets a neutral file name. The
 original file is never changed.
 

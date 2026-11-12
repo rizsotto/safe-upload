@@ -13,7 +13,7 @@ People upload photos to social media, dating sites, marketplaces, forums and sup
 On Linux this takes 2 to 4 separate apps today. Safe Upload puts it where the upload starts: **the file chooser**. When you pick an image, you can switch on "Prepare for upload". The app then gets a cleaned copy:
 
 - all metadata removed (EXIF, XMP, IPTC, GPS, embedded thumbnails),
-- re-encoded to fit **a file size you choose** ("under 2 MB"), not a resolution,
+- re-encoded to fit **a file size you choose** ("under 5 MB"), not a resolution,
 - optionally with parts painted over or pixelated,
 - with a neutral file name.
 
@@ -28,7 +28,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 | ID | User story | Must work in v1 |
 |---|---|---|
 | UC-1 | As a user uploading a phone photo to a dating site, I want location and camera data removed so strangers cannot find where I live. | Yes |
-| UC-2 | As a user, I want to type "max 2 MB" and get a file that fits, without knowing what resolution or JPEG quality means. | Yes |
+| UC-2 | As a user, I want to type "max 5 MB" and get a file that fits, without knowing what resolution or JPEG quality means. | Yes |
 | UC-3 | As a user, I want to paint over a car plate, a face or a document number before uploading. | Yes |
 | UC-4 | As an iPhone user, I want HEIC photos turned into JPEG because many sites reject HEIC. | Yes |
 | UC-5 | As a user, I want the uploaded file name to be neutral (not `IMG_20260412_183301.jpg`), because that name leaks the date. | Yes |
@@ -67,7 +67,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 - Redaction tools: solid box (default), pixelate, blur (with warning). Plus crop.
 - Neutral output file names.
 - Batch: the same settings for all selected images.
-- Per-app presets (for example "Firefox: on, 2 MB").
+- Per-app presets (for example "Firefox: on, 5 MB").
 - A "what was removed" summary.
 - **Three ways to use it:** a CLI (for tests and power users), a standalone GTK app, and a file chooser portal integration.
 - Works on any desktop that uses xdg-desktop-portal. Tier 1: GNOME and Niri (section 7.3).
@@ -105,7 +105,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 - **FR-9** The portal remembers the toggle state and target size per app ID.
 
 ### Non-functional
-- **NFR-1** Processing a 12 MP JPEG to 2 MB takes under 2 seconds on a mid-range laptop (target, not a hard limit).
+- **NFR-1** Processing a 12 MP JPEG to 5 MB takes under 2 seconds on a mid-range laptop (target, not a hard limit). Fit-to-size should predict the encoder settings from the image, so it needs one encode in the common case (section 9.3).
 - **NFR-2** Image decoding must be sandboxed or use memory-safe decoders. Input files are untrusted.
 - **NFR-3** No network access at all. The Flatpak manifest must not request `--share=network`.
 - **NFR-4** Follow the GNOME HIG, support keyboard-only use, and work with screen readers.
@@ -123,7 +123,7 @@ The user's normal file chooser opens (Nautilus on GNOME, the GTK chooser on Niri
 │ Firefox wants to open: beach.jpg, kids.heic                │
 │                                                            │
 │  Remove location and camera data      [always on]          │
-│  Max file size                        [ 2 MB ▾ ]           │
+│  Max file size                        [ 5 MB ▾ ]           │
 │  [Edit…]  (paint over parts)                               │
 │                                                            │
 │  [ ] Remember for Firefox                                  │
@@ -381,7 +381,7 @@ Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](mil
 
 - Work milestone by milestone. Do not start M3 before M1 passes.
 - Keep `core` free of GTK and D-Bus. It must build and test with `cargo test -p safe-upload-core` alone.
-  - Proposed clarification (awaiting human OK, see 16.8): core makes no bus connection and has no direct `zbus` dependency. glycin's private peer-to-peer channel to its sandboxed loaders (zbus over a socket pair, no bus daemon) is allowed.
+  - Clarified (human OK 2026-11-12, see 16.8): core makes no bus connection and has no direct `zbus` dependency. glycin's private peer-to-peer channel to its sandboxed loaders (zbus over a socket pair, no bus daemon) is allowed.
 - Write a test that fails first for every leak or bug you fix.
 - Do not add network dependencies (S-3).
 - Prefer small pull requests (under about 400 changed lines) with a clear description.
@@ -411,12 +411,12 @@ Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](mil
 
 1. Final name and app ID (reverse DNS).
 2. License confirmation (GPL-3.0-or-later proposed).
-3. Default target size when the toggle is first turned on (proposal: 2 MB).
+3. ~~Default target size when the toggle is first turned on?~~ Answered 2026-11-12: 5 MB, a common upload limit today.
 4. Keep blur at all, or only offer box and pixelate?
 5. Should the standalone app also register as a "Share" target in Files?
 6. Should the standalone app edit `portals.conf` for the user (with a diff and an undo), or only show instructions?
 7. First-time behavior per app: ask (proposed), or off until the user enables it?
-8. Accept the "no D-Bus" clarification in section 14? glycin talks to its loaders with zbus peer-to-peer over a socket pair; core itself makes no bus connection. Awaiting human OK. Until then M1 uses glycin as planned (M1 T05).
+8. ~~Accept the "no D-Bus" clarification in section 14?~~ Answered 2026-11-12: yes. glycin's peer-to-peer socket to its loaders is allowed; core itself makes no bus connection.
 
 Decided: HEIC decoding moves to M2; M1 refuses HEIC. See [decision 0001](decisions/0001-heic-decoding-and-fixtures.md).
 
