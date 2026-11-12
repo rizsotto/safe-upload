@@ -12,3 +12,7 @@ publish = false
 # encoder and fit-to-size tests slow.
 [profile.dev.package.mozjpeg-sys]
 opt-level = 3
+
+# The same for imagequant, used by the PNG fit-to-size tests.
+[profile.dev.package.imagequant]
+opt-level = 3
