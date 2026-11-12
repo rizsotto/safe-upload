@@ -329,6 +329,8 @@ Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](mil
 - A HEIC/HEIF input is detected by its content, not its file name, and refused with a clear message and exit code 3. No crash, no garbled output, no output file, and never the original passed through. HEIC decoding comes in M2 (see [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
 
 ### M2: Standalone app
+Status: planned 2026-11-12. Criteria, plan and tasks: [milestones/M2/](milestones/M2/spec.md).
+
 - Drag-and-drop, batch, settings, summary, save and copy all work.
 - The redaction editor supports box, pixelate, blur and crop, with undo/redo.
 - Passes the Flatpak build with no network permission.
@@ -337,11 +339,12 @@ Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](mil
 - The devcontainer and CI decode HEIC. They use RPM Fusion's `libheif-freeworld` ([decision 0001](decisions/0001-heic-decoding-and-fixtures.md), option A). Packages to add in M2: `rpmfusion-free-release`, `libheif-freeworld`, `libheif-tools` (for `heif-enc -e x265`, which makes the HEIC fixture).
 - If no HEVC decoder is present at runtime (for example a host install without RPM Fusion, or a Flatpak without the `codecs-extra` extension), the user gets a clear message and the CLI exits with code 3. Never a crash or a raw library error.
 - Every test runs in CI. None is skipped, ignored or silently degraded.
-- **Open items (resolve at the start of M2, do not guess):**
-  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. Partly settled in M1 T05: the T05 test forces `SandboxSelector::Bwrap`, so it fails instead of decoding unsandboxed. M1 T06 must make the core decoder do the same, so decoding and CI fail when bwrap cannot run. Checked locally: under a Docker-like seccomp profile bwrap cannot create namespaces and the T05 test fails. CI turns off seccomp and AppArmor confinement for the job container and allows unprivileged user namespaces on the runner (`.github/ci/devcontainer.json`, `.github/workflows/ci.yml`). Verified on GitHub runners: CI runs 43158776772 (round 1) through 43170714939 (round 3) passed with the T05 and T06 sandbox tests, which fail when decoding runs without bwrap. In Flatpak (M2) core must select `FlatpakSpawn` instead.
-  - Not verified: the GNOME runtime decodes HEIC through glycin's `flatpak-spawn --sandbox` subsandbox with `codecs-extra`. If it does not, HEIC stays refused in the Flatpak and a new decision record is needed.
-  - How to test "decoder missing" end to end in CI, where the decoder is installed. A fake `Decoder` covers the error mapping. An end-to-end check (for example an empty libheif plugin path) is not verified.
-  - How to make a HEIC fixture with a rotation (`irot`) to test "upright". Not yet known.
+- **Open items (resolved at the start of M2, see [milestones/M2/plan.md](milestones/M2/plan.md), "Facts verified"):**
+  - glycin's bwrap sandbox on GitHub runners: settled in M1 (T05, T06). Core forces `SandboxSelector::Bwrap`; CI runs 43158776772 through 43170714939 passed with the sandbox tests. CI turns off seccomp and AppArmor confinement for the job container and allows unprivileged user namespaces on the runner (`.github/ci/devcontainer.json`, `.github/workflows/ci.yml`). In Flatpak core selects `FlatpakSpawn` instead (verified: `Bwrap` cannot run inside a Flatpak).
+  - Verified 2026-11-12: the GNOME 51 runtime decodes HEIC through glycin's `flatpak-spawn --sandbox` subsandbox with `codecs-extra` (M2 plan, "Facts verified").
+  - "Decoder missing" end to end: hide the libheif plugin folder with `unshare -rm` and a tmpfs mount; glycin's bwrap still runs and HEIC fails with `NoMatchingDecoderInstalled` (verified). A fake `Decoder` is not needed.
+  - Rotated HEIC fixture: `heif-enc -e x265 --rotate-cw 90` writes an `irot` box. glycin applies `irot` in the loader and ignores EXIF orientation for HEIF (verified), so the fixture also gets EXIF `Orientation=6` to catch double rotation.
+  - Still open: the Flatpak CI job on a GitHub runner (M2 task T13).
 
 ### M3: Wrapper portal backend
 - With `portals.conf` routing FileChooser to our backend, Firefox and a GTK4 test app receive processed files when the preset is on, and originals when it is off.
@@ -402,18 +405,22 @@ Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](mil
 - [ ] Whether `GtkFileChooserWidget` is deprecated since GTK 4.10 (it only affects the fallback idea, not the main design).
 - [ ] Whether Firefox and Chrome on GNOME use the portal file chooser by default outside Flatpak or Snap. Firefox has the setting `widget.use-xdg-desktop-portal.file-picker`.
 - [x] glycin's public API exposes the ICC profile and the orientation (M1). Checked in task M1 T05 with the `glycin` crate 4.0.5 and Fedora `glycin-loaders` 2.2.6: `Loader::color_convert_icc_srgb(false)` keeps the profile, which `FrameDetails::color_icc_profile()` returns; `Image::transformation_orientation()` gives the EXIF orientation, and `Loader::apply_transformations(true)` applies it to the pixels. Test: `crates/core/tests/glycin_sandbox.rs`. Sources: glycin-core 4.0.5 `src/api/loader.rs`, `src/api/common.rs`.
-- [ ] Whether glycin can decode HEIC in the user's runtime (M2, partly answered in [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
+- [x] Whether glycin can decode HEIC in the user's runtime (M2). Flatpak: yes. Checked 2026-11-12 with `org.gnome.Platform//51` (commit `2ec125d2`) and `org.freedesktop.Platform.codecs-extra//26.08-extra` from Flathub: a minimal installed app with only `--socket=wayland` loaded HEIC with `SandboxSelector::FlatpakSpawn`; glycin's log showed `flatpak-spawn --sandbox ... glycin-heif` (v2.2.0). `Bwrap` fails inside the Flatpak. Host: only with RPM Fusion's `libheif-freeworld` ([decision 0001](decisions/0001-heic-decoding-and-fixtures.md)); without it glycin returns `NoMatchingDecoderInstalled` from `next_frame()`. glycin applies the HEIF `irot` box itself and ignores EXIF orientation for HEIF (Fedora loaders 2.2.6 and the GNOME 51 loader). Details: [milestones/M2/plan.md](milestones/M2/plan.md), "Facts verified".
+- [x] GTK4 tests run headless (M2). gtk4-rs 0.11.5 `#[gtk::test]` works under `weston --backend=headless`, `mutter --headless`, broadway and Xvfb in the devcontainer image (GTK 4.24.1, libadwaita 1.10.0). On the headless Wayland compositors the window is not active, so tests check `GtkWindow::focus()`, not `has_focus()`. The AT-SPI tree is readable with pyatspi under weston and `dbus-run-session`. Details: M2 plan.
+- [x] The GNOME 51 runtime ships the same GTK (4.24.1) and libadwaita (1.10.0) as Fedora 45, and its glycin loaders (`glycin-heif`, `glycin-image-rs`) (M2).
+- [ ] The Flathub `gnome-51` builder container can install and run the built Flatpak on a GitHub runner, for the HEIC test (M2 T13). Works in rootless podman with `seccomp=unconfined` and `unmask=/proc/*`.
+- [ ] Which apps accept an `image/jpeg` clipboard paste (Firefox, Chromium). M2 copies the verified bytes with their own MIME type.
 - [ ] Whether `ashpd` supports implementing portal backends, or only plain `zbus` does.
 
 ---
 
 ## 16. Open questions for the human
 
-1. Final name and app ID (reverse DNS).
+1. Final name and app ID (reverse DNS). M2 uses the placeholder `org.example.SafeUpload` until then (M2 task T19 renames it).
 2. License confirmation (GPL-3.0-or-later proposed).
 3. ~~Default target size when the toggle is first turned on?~~ Answered 2026-11-12: 5 MB, a common upload limit today.
-4. Keep blur at all, or only offer box and pixelate?
-5. Should the standalone app also register as a "Share" target in Files?
+4. Keep blur at all, or only offer box and pixelate? Blocks only M2 task T15. If blur is dropped, the M2 criterion and 6.3 change instead.
+5. Should the standalone app also register as a "Share" target in Files? Not in the M2 criteria; deferred.
 6. Should the standalone app edit `portals.conf` for the user (with a diff and an undo), or only show instructions?
 7. First-time behavior per app: ask (proposed), or off until the user enables it?
 8. ~~Accept the "no D-Bus" clarification in section 14?~~ Answered 2026-11-12: yes. glycin's peer-to-peer socket to its loaders is allowed; core itself makes no bus connection.
