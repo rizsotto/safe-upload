@@ -383,8 +383,9 @@ container (`--privileged`, as the flathub action needs), with
    The script runs `dbus-run-session -- flatpak run --command=safe-upload
    org.example.SafeUpload heic-gps.heic --max-size 5MB -o gps.jpg` and the
    same for `heic-rot90.heic`, expects exit 0, and uploads the outputs.
-   The D-Bus session autostarts `flatpak-portal` (verified in a podman
-   spike).
+   The flathub image has no service file for `flatpak-portal`, so the
+   script starts it itself (verbose) in the D-Bus session and fails unless
+   its log shows the sandboxed `glycin-heif` spawn (T13).
 4. A small third job `flatpak-check` in the devcontainer image (it has
    exiftool and ImageMagick) runs `build-aux/ci/check-heic-outputs.sh` on
    those outputs: JPEG, size under 5 MB, exiftool allow list (same list as
@@ -572,10 +573,11 @@ summarized here.
 
 Not verified (each has a task that checks it first):
 
-- [ ] The flatpak CI job on a GitHub runner (T13).
-- [ ] `nasm`, `libseccomp` and `fontconfig` headers in `org.gnome.Sdk//51`
-  for building mozjpeg with SIMD and the glycin crate (T13; the GNOME Sdk
-  builds glycin itself, so libseccomp is very likely there).
+- [ ] The flatpak CI job on a GitHub runner (T13). Works locally in
+  podman `--privileged`; see SPEC 15 for what T13 found (own
+  `flatpak-portal`, "Invalid cross-device link" under podman overlay).
+- [x] `nasm`, `libseccomp` and `fontconfig` in `org.gnome.Sdk//51`
+  (T13, SPEC 15): all there; the offline build links mozjpeg with SIMD.
 - [ ] Which apps accept an `image/jpeg` clipboard paste (manual, at
   acceptance; deferred question).
 - [ ] Drops from Nautilus into the Flatpak on a real desktop (manual, at

@@ -23,6 +23,9 @@ jobs:
             build-aux/ci/check-no-network-crates.sh Cargo.lock crates
             build-aux/ci/test-check-app-id.sh
             build-aux/ci/check-app-id.sh
+            build-aux/ci/test-check-flatpak-permissions.sh
+            build-aux/ci/check-flatpak-permissions.sh build-aux/flatpak/org.example.SafeUpload.json
+            build-aux/ci/test-check-heic-outputs.sh
             desktop-file-validate data/*.desktop
             appstreamcli validate --no-net data/*.metainfo.xml
             glib-compile-schemas --strict --dry-run data
@@ -32,3 +35,68 @@ jobs:
             cargo fmt --all -- --check
             cargo clippy --locked --workspace --all-targets -- -D warnings
             cargo test --locked --workspace
+      # The flatpak job tests the HEIC path with these; its container has
+      # no x265 encoder to make them.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heic-fixtures
+          path: target/fixtures/heic-*.heic
+          if-no-files-found: error
+
+  # Builds the Flatpak offline with no network permission and turns the HEIC
+  # fixtures into JPEGs with the installed app (SPEC 12 M2, plan "Flatpak").
+  flatpak:
+    needs: check
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-sources.json matches Cargo.lock
+        run: build-aux/flatpak/update-cargo-sources.sh --check
+      # run-tests stays off: the action adds --share=network to test-args.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: build-aux/flatpak/org.example.SafeUpload.json
+          bundle: safe-upload.flatpak
+          build-dir: flatpak_app
+          run-tests: false
+      # The action builds a rewritten copy of the manifest; check that too.
+      - name: Permissions
+        run: >-
+          build-aux/ci/check-flatpak-permissions.sh
+          build-aux/flatpak/org.example.SafeUpload.json
+          build-aux/flatpak/flatpak-github-action-modified-org.example.SafeUpload.json
+          flatpak_app
+      # After the build, so the manifest's dir source does not copy them.
+      - uses: actions/download-artifact@v4
+        with:
+          name: heic-fixtures
+          path: heic-fixtures
+      # glycin's FlatpakSpawn needs an installed app, not flatpak-builder --run.
+      - name: Install
+        run: flatpak install --user -y --noninteractive safe-upload.flatpak
+      - name: HEIC in the Flatpak
+        run: build-aux/flatpak/test-heic.sh heic-fixtures heic-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heic-outputs
+          path: heic-out
+          if-no-files-found: error
+
+  # The flatpak container has no exiftool or ImageMagick; the devcontainer has.
+  flatpak-check:
+    needs: flatpak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: heic-outputs
+          path: heic-out
+      - uses: devcontainers/ci@v0.3
+        with:
+          configFile: .github/ci/devcontainer.json
+          runCmd: build-aux/ci/check-heic-outputs.sh heic-out
