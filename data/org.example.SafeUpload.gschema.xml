@@ -7,6 +7,7 @@
   </enum>
   <schema id="org.example.SafeUpload" path="/org/example/SafeUpload/">
     <key name="max-size" type="t">
+      <range min="100000" max="100000000"/>
       <default>5000000</default>
       <summary>Largest output file size in bytes</summary>
     </key>

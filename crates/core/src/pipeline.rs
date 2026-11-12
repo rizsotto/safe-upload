@@ -13,7 +13,7 @@ use image::{RgbaImage, imageops};
 use crate::color::SourceColor;
 use crate::decode::{Decoder, GlycinDecoder};
 use crate::encode::{Encoder, JpegEncoder, OutputProfile, Pixels, PngEncoder};
-use crate::output::{PrivateDir, neutral_name};
+use crate::output::{PrivateDir, file_name};
 use crate::summary::{self, Summary};
 use crate::{Error, Limits, Options, OutputFormat, color, edit, fit, orient, sniff, verify};
 
@@ -187,11 +187,7 @@ fn choose_format(wanted: OutputFormat, has_alpha: bool) -> OutputFormat {
 }
 
 fn output_name(input: &Path, opts: &Options, target: Target<'_>, ext: &str) -> String {
-    let stem = input.file_stem().and_then(|s| s.to_str());
-    match stem {
-        Some(stem) if opts.keep_name && !stem.is_empty() => format!("{stem}.{ext}"),
-        _ => neutral_name(target.position, target.total, ext),
-    }
+    file_name(input, opts.keep_name, target.position, target.total, ext)
 }
 
 /// The input size and the metadata kinds in it, for the summary (FR-8).
