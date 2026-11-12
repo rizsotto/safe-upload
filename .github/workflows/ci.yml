@@ -20,9 +20,9 @@ jobs:
           runCmd: |
             set -euo pipefail
             build-aux/ci/test-check-no-network-crates.sh
-            build-aux/ci/check-no-network-crates.sh Cargo.lock
+            build-aux/ci/check-no-network-crates.sh Cargo.lock crates
             tests/fixtures/make.sh target/fixtures
             tests/fixtures/check.sh target/fixtures
             cargo fmt --all -- --check
-            cargo clippy --workspace --all-targets -- -D warnings
-            cargo test --workspace
+            cargo clippy --locked --workspace --all-targets -- -D warnings
+            cargo test --locked --workspace

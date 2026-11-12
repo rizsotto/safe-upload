@@ -16,8 +16,10 @@ lock() {
 
 fail=0
 expect() {
-    want=$1 file=$2
-    if "$check" "$file" >/dev/null 2>&1; then got=0; else got=$?; fi
+    want=$1
+    shift
+    file=$*
+    if "$check" "$@" >/dev/null 2>&1; then got=0; else got=$?; fi
     if [ "$got" != "$want" ]; then
         echo "FAIL: $file exited $got, want $want" >&2
         fail=1
@@ -39,7 +41,20 @@ expect 0 "$tmp/similar.lock"
 
 expect 2 "$tmp/missing.lock"
 
-expect 0 "$here/../../Cargo.lock"
+lock socket2 >"$tmp/socket2.lock"
+expect 1 "$tmp/socket2.lock"
+
+printf 'version = 4\n' >"$tmp/empty.lock"
+expect 2 "$tmp/empty.lock"
+
+mkdir -p "$tmp/src-clean" "$tmp/src-net/sub"
+printf 'fn main() {}\n' >"$tmp/src-clean/main.rs"
+printf 'use std::net::TcpStream;\n' >"$tmp/src-net/sub/lib.rs"
+expect 0 "$tmp/clean.lock" "$tmp/src-clean"
+expect 1 "$tmp/clean.lock" "$tmp/src-clean" "$tmp/src-net"
+expect 2 "$tmp/clean.lock" "$tmp/no-such-dir"
+
+expect 0 "$here/../../Cargo.lock" "$here/../../crates"
 
 [ "$fail" = 0 ] && echo "no-network self test: ok"
 exit "$fail"
