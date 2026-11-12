@@ -87,6 +87,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 - PDF metadata stripping.
 - Upstream proposals: an in-dialog "Prepare for upload" toggle in Nautilus (GNOME's file chooser) and in the GTK portal's chooser.
 - Hand off "Edit…" to Loupe's edit mode, once Loupe has redaction (see the separate Screenshot Annotator project spec).
+- Privacy gatekeeper for every file type: always inspect, flag hidden metadata and visible personal data (also text in screenshots), then strip, edit or send on purpose. After the MVP. See `spec/vision/privacy-gatekeeper.md`.
 
 ---
 
