@@ -1,0 +1,10 @@
+[package]
+name = "safe-upload-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "safe-upload"
+path = "src/main.rs"
