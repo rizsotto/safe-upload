@@ -16,13 +16,16 @@ bad() {
     echo "app-id: $*" >&2
     fail=1
 }
+# has FILE LINE...: FILE has a line equal to one of the LINEs, apart from
+# leading and trailing blanks. Exact, so a longer ID like "$id.Devel" fails.
 has() {
     file=$1
-    text=$2
+    shift
     if [ ! -r "$file" ]; then
         bad "missing $file"
-    elif ! grep -qF -- "$text" "$file"; then
-        bad "$file does not contain: $text"
+    elif ! sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$file" |
+        grep -qxF "$(printf '%s\n' "$@")"; then
+        bad "$file has no line: $1"
     fi
 }
 
@@ -35,17 +38,25 @@ has "$data/$id.gschema.xml" "<schema id=\"$id\" path=\"$path\">"
 [ -r "$data/icons/hicolor/scalable/apps/$id.svg" ] ||
     bad "missing $data/icons/hicolor/scalable/apps/$id.svg"
 
-for f in $(find "$data" -type f ! -name .gitkeep); do
-    case $(basename "$f") in
-    "$id".*) ;;
-    *) bad "$f is not named after $id" ;;
-    esac
-done
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
 
-for f in $(find "$root/build-aux/flatpak" -maxdepth 1 -name '*.json' ! -name cargo-sources.json 2>/dev/null); do
-    [ "$(basename "$f")" = "$id.json" ] || bad "$f is not named $id.json"
-    grep -qE "\"id\": *\"$id\"" "$f" || bad "$f does not have \"id\": \"$id\""
-done
+find "$data" -type f ! -name .gitkeep >"$files"
+while IFS= read -r f; do
+    case $(basename "$f") in
+    "$id.desktop" | "$id.metainfo.xml" | "$id.gschema.xml" | "$id.svg") ;;
+    *) bad "$f is not a known data file named after $id" ;;
+    esac
+done <"$files"
+
+if [ -d "$root/build-aux/flatpak" ]; then
+    find "$root/build-aux/flatpak" -maxdepth 1 -name '*.json' \
+        ! -name cargo-sources.json >"$files"
+    while IFS= read -r f; do
+        [ "$(basename "$f")" = "$id.json" ] || bad "$f is not named $id.json"
+        has "$f" "\"id\": \"$id\"," "\"id\": \"$id\""
+    done <"$files"
+fi
 
 [ "$fail" = 0 ] || exit 1
 echo "app-id: $id is used consistently"

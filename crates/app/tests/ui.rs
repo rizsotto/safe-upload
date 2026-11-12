@@ -6,7 +6,10 @@ mod headless;
 
 use std::cell::OnceCell;
 use std::ffi::OsStr;
-use std::process::ExitCode;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::Duration;
 
@@ -46,13 +49,43 @@ fn missing_weston_fails_with_clear_message() {
     assert!(headless::require_program("weston", Some(OsStr::new(""))).is_err());
 }
 
+fn require_program_needs_the_exec_bit() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("weston");
+    fs::write(&file, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(headless::require_program("weston", Some(dir.path().as_os_str())).is_err());
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        headless::require_program("weston", Some(dir.path().as_os_str())).unwrap(),
+        file
+    );
+}
+
+fn abort_cleanup_kills_children_and_removes_root() {
+    let root = tempfile::tempdir().unwrap().keep();
+    fs::write(root.join("weston.log"), "").unwrap();
+    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+    headless::abort_cleanup(&[child.id()], &root);
+    assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    assert!(!root.exists());
+}
+
+fn children_die_with_their_parent() {
+    let mut child = thread::spawn(|| {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        headless::die_with_parent(&mut cmd);
+        cmd.spawn().unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+}
+
 fn main() -> ExitCode {
     let env = headless::Headless::start();
-    thread::spawn(|| {
-        thread::sleep(WATCHDOG);
-        eprintln!("UI tests did not finish in {WATCHDOG:?}");
-        std::process::exit(1);
-    });
+    env.watchdog(WATCHDOG);
 
     adw::init().expect("GTK init under headless weston");
     let app = safe_upload_app::application();
@@ -65,6 +98,18 @@ fn main() -> ExitCode {
         (
             "missing_weston_fails_with_clear_message",
             missing_weston_fails_with_clear_message,
+        ),
+        (
+            "require_program_needs_the_exec_bit",
+            require_program_needs_the_exec_bit,
+        ),
+        (
+            "abort_cleanup_kills_children_and_removes_root",
+            abort_cleanup_kills_children_and_removes_root,
+        ),
+        (
+            "children_die_with_their_parent",
+            children_die_with_their_parent,
         ),
     ]);
     drop(env);

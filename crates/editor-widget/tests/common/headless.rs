@@ -11,7 +11,8 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File};
 use std::io::ErrorKind;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -25,13 +26,39 @@ pub fn require_program(name: &str, path: Option<&OsStr>) -> Result<PathBuf, Stri
     path.into_iter()
         .flat_map(env::split_paths)
         .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+        .find(|p| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
         .ok_or_else(|| {
             format!(
                 "headless UI tests need `{name}`, but it is not in PATH. \
                  Add it to .devcontainer/Containerfile; UI tests never skip."
             )
         })
+}
+
+/// Makes the child get SIGKILL when the thread that spawned it exits, so a
+/// crashed or aborted test run leaves no weston or dbus-daemon behind.
+pub fn die_with_parent(cmd: &mut Command) {
+    // SAFETY: prctl is async-signal-safe and touches no memory of ours.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Kills `pids` and removes `root`. For exits that skip `Drop`.
+pub fn abort_cleanup(pids: &[u32], root: &Path) {
+    for &pid in pids.iter().rev() {
+        // SAFETY: plain syscall; the pids are our own unreaped children.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = fs::remove_dir_all(root);
 }
 
 pub struct Headless {
@@ -121,10 +148,24 @@ impl Headless {
         assert!(status.success(), "glib-compile-schemas failed");
     }
 
+    /// Fails the run if it takes longer than `timeout`. Cleans up first,
+    /// because `process::exit` skips `Drop`.
+    pub fn watchdog(&self, timeout: Duration) {
+        let pids: Vec<u32> = self.children.iter().map(Child::id).collect();
+        let root = self.root.clone();
+        thread::spawn(move || {
+            thread::sleep(timeout);
+            eprintln!("UI tests did not finish in {timeout:?}");
+            abort_cleanup(&pids, &root);
+            std::process::exit(1);
+        });
+    }
+
     fn spawn(&mut self, cmd: &mut Command, name: &str, ready: &Path) {
         let log = self.root.join(format!("{name}.log"));
         let out = File::create(&log).expect("create log file");
         let err = out.try_clone().expect("clone log file");
+        die_with_parent(cmd);
         let child = cmd
             .stdin(Stdio::null())
             .stdout(out)

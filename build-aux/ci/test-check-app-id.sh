@@ -69,6 +69,36 @@ copy
 printf '{\n  "id": "%s"\n}\n' "$id" >"$tmp/r/build-aux/flatpak/org.example.Other.json"
 expect 1 "a Flatpak manifest with another file name"
 
+# A longer ID that starts with the real one must not pass.
+copy
+sed -i "s/^Icon=.*/Icon=$id.Devel/" "$tmp/r/data/$id.desktop"
+expect 1 "an Icon with a longer ID"
+
+copy
+sed -i "s|<id>.*</id>|<id>$id.Devel</id>|" "$tmp/r/data/$id.metainfo.xml"
+expect 1 "a metainfo id with a longer ID"
+
+copy
+cp "$tmp/r/data/$id.desktop" "$tmp/r/data/$id.Devel.desktop"
+expect 1 "a data file named after a longer ID"
+
+copy
+printf '{\n  "id": "%s.Devel"\n}\n' "$id" >"$tmp/r/build-aux/flatpak/$id.json"
+expect 1 "a Flatpak manifest with a longer id"
+
+copy
+sed -i "s|<launchable type=\"desktop-id\">.*</launchable>|<launchable type=\"desktop-id\">org.example.Other.desktop</launchable>|" \
+    "$tmp/r/data/$id.metainfo.xml"
+expect 1 "another launchable in the metainfo"
+
+copy
+sed -i "s|path=\"[^\"]*\"|path=\"/org/example/Other/\"|" "$tmp/r/data/$id.gschema.xml"
+expect 1 "another gschema path"
+
+copy
+printf '{\n  "id": "%s",\n  "runtime": "org.gnome.Platform"\n}\n' "$id" >"$tmp/r/build-aux/flatpak/$id.json"
+expect 0 "a Flatpak manifest with more keys"
+
 copy
 rm "$tmp/r/crates/app/src/config.rs"
 expect 2 "a missing config.rs"

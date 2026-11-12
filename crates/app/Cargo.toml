@@ -10,6 +10,10 @@ adw.workspace = true
 gettext-rs.workspace = true
 gtk.workspace = true
 
+[dev-dependencies]
+libc = "0.2"
+tempfile = "3"
+
 [[test]]
 name = "ui"
 harness = false
