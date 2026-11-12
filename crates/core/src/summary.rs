@@ -3,7 +3,8 @@
 //!
 //! The input is hostile, so the scan is plain bounds-checked Rust and
 //! reads only a fixed set of places: JPEG segments, PNG chunks, WebP
-//! chunks, and in EXIF only IFD0, the Exif IFD and whether IFD1 exists.
+//! chunks, HEIF `Exif` and XMP items, and in EXIF only IFD0, the Exif IFD
+//! and whether IFD1 exists.
 
 use std::fmt;
 
@@ -102,6 +103,8 @@ pub fn scan(bytes: &[u8]) -> Option<Vec<Removed>> {
         scan_png(bytes, &mut found);
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         scan_webp(bytes, &mut found);
+    } else if is_heif(bytes) {
+        scan_heif(bytes, &mut found);
     } else {
         return None;
     }
@@ -181,6 +184,178 @@ fn scan_webp(b: &[u8], found: &mut Vec<Removed>) {
         }
         i = i.saturating_add(8).saturating_add(len + (len & 1));
     }
+}
+
+/// ISOBMFF boxes in `b` as (type, payload). Payloads are cut at the end
+/// of `b`; a box with a bad size ends the walk.
+fn boxes(b: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let size = be32(b, i)?;
+        let kind = b.get(i + 4..i + 8)?;
+        let (start, size) = match size {
+            0 => (i + 8, b.len() - i),
+            1 => (i + 16, usize::try_from(be64(b, i + 8)?).ok()?),
+            n => (i + 8, n),
+        };
+        let end = i.checked_add(size)?;
+        if end < start {
+            return None;
+        }
+        let data = &b[start.min(b.len())..end.min(b.len())];
+        i = end;
+        Some((kind, data))
+    })
+}
+
+fn be64(b: &[u8], i: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(b.get(i..i + 8)?.try_into().ok()?))
+}
+
+/// An unsigned big-endian integer of 0, 2, 4 or 8 bytes.
+fn uint(b: &[u8], i: usize, size: usize) -> Option<usize> {
+    match size {
+        0 => Some(0),
+        2 => be16(b, i),
+        4 => be32(b, i),
+        8 => usize::try_from(be64(b, i)?).ok(),
+        _ => None,
+    }
+}
+
+const HEIF_BRANDS: &[&[u8]] = &[
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"mif2", b"msf1",
+];
+
+/// An `ftyp` box with a HEIF brand and no AVIF brand (AVIF is not scanned).
+fn is_heif(b: &[u8]) -> bool {
+    let Some((b"ftyp", ftyp)) = boxes(b).next() else {
+        return false;
+    };
+    let brands: Vec<&[u8]> = ftyp
+        .get(..4)
+        .into_iter()
+        .chain(
+            ftyp.get(8..)
+                .unwrap_or(&[])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| c.as_slice()),
+        )
+        .collect();
+    !brands.iter().any(|b| *b == b"avif" || *b == b"avis")
+        && brands.iter().any(|b| HEIF_BRANDS.contains(b))
+}
+
+/// Reads the top-level `meta` box: `Exif` items are scanned like other
+/// EXIF, `mime` items with RDF/XML are XMP.
+fn scan_heif(b: &[u8], found: &mut Vec<Removed>) {
+    let Some((_, meta)) = boxes(b).find(|(kind, _)| *kind == b"meta") else {
+        return;
+    };
+    let (mut exif_items, mut iloc, mut idat) = (Vec::new(), None, None);
+    for (kind, data) in boxes(meta.get(4..).unwrap_or(&[])) {
+        match kind {
+            b"iinf" => scan_iinf(data, &mut exif_items, found),
+            b"iloc" => iloc = Some(data),
+            b"idat" => idat = Some(data),
+            _ => {}
+        }
+    }
+    for id in exif_items {
+        let data = iloc.and_then(|l| item_data(b, l, idat.unwrap_or(&[]), id));
+        // The payload starts with the offset of the TIFF header.
+        let tiff = data
+            .as_deref()
+            .and_then(|d| d.get(be32(d, 0)?.checked_add(4)?..));
+        match tiff {
+            Some(t) => scan_exif(t, found),
+            None => found.push(Removed::OtherExif),
+        }
+    }
+}
+
+/// Item infos (`infe` version 2 and 3): collects `Exif` item IDs and
+/// reports XMP `mime` items.
+fn scan_iinf(b: &[u8], exif_items: &mut Vec<usize>, found: &mut Vec<Removed>) {
+    let start = if b.first() == Some(&0) { 6 } else { 8 };
+    for (kind, e) in boxes(b.get(start..).unwrap_or(&[])).take(MAX_ENTRIES) {
+        let version = e.first().copied().unwrap_or(0);
+        if kind != b"infe" || version < 2 {
+            continue;
+        }
+        let (id, at) = if version == 2 {
+            (be16(e, 4), 8)
+        } else {
+            (be32(e, 4), 10)
+        };
+        match (id, e.get(at..at + 4)) {
+            (Some(id), Some(b"Exif")) => exif_items.push(id),
+            (_, Some(b"mime")) => {
+                let content_type = e.get(at + 4..).unwrap_or(&[]);
+                if content_type.starts_with(b"application/rdf+xml\0") {
+                    found.push(Removed::Xmp);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The bytes of item `id` from `iloc`: in the file (construction method
+/// 0) or in `idat` (method 1). `None` for anything else or bad offsets.
+fn item_data(file: &[u8], iloc: &[u8], idat: &[u8], id: usize) -> Option<Vec<u8>> {
+    let version = *iloc.first()?;
+    let sizes = be16(iloc, 4)?;
+    let (off_size, len_size) = (sizes >> 12, (sizes >> 8) & 0xf);
+    let (base_size, index_size) = ((sizes >> 4) & 0xf, sizes & 0xf);
+    let id_size = if version < 2 { 2 } else { 4 };
+    let mut i = 6;
+    let count = uint(iloc, i, id_size)?;
+    i += id_size;
+    for _ in 0..count.min(MAX_ENTRIES) {
+        let item = uint(iloc, i, id_size)?;
+        i += id_size;
+        let method = if version == 0 {
+            0
+        } else {
+            i += 2;
+            be16(iloc, i - 2)? & 0xf
+        };
+        i += 2;
+        let base = uint(iloc, i, base_size)?;
+        i += base_size;
+        let extents = be16(iloc, i)?;
+        i += 2;
+        let mut data = Vec::new();
+        for _ in 0..extents.min(MAX_ENTRIES) {
+            if version > 0 {
+                i += index_size;
+            }
+            let off = uint(iloc, i, off_size)?;
+            i += off_size;
+            let len = uint(iloc, i, len_size)?;
+            i += len_size;
+            if item == id {
+                let src = match method {
+                    0 => file,
+                    1 => idat,
+                    _ => return None,
+                };
+                // All extents together are never larger than their source.
+                if data.len().saturating_add(len) > src.len() {
+                    return None;
+                }
+                let start = base.checked_add(off)?;
+                data.extend_from_slice(src.get(start..start.checked_add(len)?)?);
+            }
+        }
+        if item == id {
+            return Some(data);
+        }
+    }
+    None
 }
 
 const MAX_ENTRIES: usize = 1000;
@@ -350,6 +525,101 @@ mod tests {
             []
         );
         assert_eq!(scan(b"ftypavif"), None);
+    }
+
+    fn bx(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        [
+            &((data.len() + 8) as u32).to_be_bytes(),
+            kind.as_slice(),
+            data,
+        ]
+        .concat()
+    }
+
+    /// HEIF with an Exif item stored in `idat` (construction method 1) and
+    /// an XMP `mime` item.
+    fn heif() -> Vec<u8> {
+        let exif = [&6u32.to_be_bytes(), b"Exif\0\0".as_slice(), &tiff()].concat();
+        let infe = |id: u8, kind: &[u8; 4], rest: &[u8]| {
+            bx(
+                b"infe",
+                &[&[2, 0, 0, 0, 0, id, 0, 0], kind.as_slice(), rest].concat(),
+            )
+        };
+        let iinf = bx(
+            b"iinf",
+            &[
+                [0, 0, 0, 0, 0, 2].as_slice(),
+                &infe(1, b"Exif", b""),
+                &infe(2, b"mime", b"application/rdf+xml\0"),
+            ]
+            .concat(),
+        );
+        // Version 1, offset and length 4 bytes, no base offset, one item:
+        // id 1, method 1, one extent at 0 of the Exif length.
+        let iloc = bx(
+            b"iloc",
+            &[
+                [1, 0, 0, 0, 0x44, 0x00, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1].as_slice(),
+                &0u32.to_be_bytes(),
+                &(exif.len() as u32).to_be_bytes(),
+            ]
+            .concat(),
+        );
+        let meta = bx(
+            b"meta",
+            &[[0, 0, 0, 0].as_slice(), &iinf, &iloc, &bx(b"idat", &exif)].concat(),
+        );
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    #[test]
+    fn heif_kinds() {
+        assert_eq!(
+            scan(&heif()).unwrap(),
+            [
+                Removed::Location,
+                Removed::Camera,
+                Removed::Thumbnail,
+                Removed::Xmp
+            ]
+        );
+    }
+
+    #[test]
+    fn heif_without_meta_has_nothing() {
+        assert_eq!(scan(&bx(b"ftyp", b"heic\0\0\0\0mif1heic")).unwrap(), []);
+    }
+
+    #[test]
+    fn heif_garbage_does_not_panic() {
+        let h = heif();
+        for n in 0..h.len() {
+            scan(&h[..n]);
+        }
+        let mut bad = h.clone();
+        for i in 0..bad.len() {
+            bad[i] ^= 0xff;
+            scan(&bad);
+            bad[i] ^= 0xff;
+        }
+        let huge = [
+            bx(b"ftyp", b"mif1\0\0\0\0heic"),
+            b"\xff\xff\xff\xffmeta\0".to_vec(),
+        ]
+        .concat();
+        assert!(scan(&huge).is_some());
+        let large = [
+            bx(b"ftyp", b"heic\0\0\0\0"),
+            b"\0\0\0\x01meta\xff\xff\xff\xff\xff\xff\xff\xff".to_vec(),
+        ]
+        .concat();
+        assert!(scan(&large).is_some());
+    }
+
+    #[test]
+    fn avif_is_not_scanned_as_heif() {
+        assert_eq!(scan(&bx(b"ftyp", b"avif\0\0\0\0mif1avif")), None);
     }
 
     #[test]
