@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Safe Upload
+Comment=Remove metadata from images and shrink them before you upload
+Exec=safe-upload-app
+Icon=org.example.SafeUpload
+Terminal=false
+Type=Application
+Categories=Graphics;
+Keywords=privacy;metadata;exif;gps;resize;redact;
+StartupNotify=true

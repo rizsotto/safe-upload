@@ -3,8 +3,10 @@
 //!
 //! The input is hostile, so the scan is plain bounds-checked Rust and
 //! reads only a fixed set of places: JPEG segments, PNG chunks, WebP
-//! chunks, and in EXIF only IFD0, the Exif IFD and whether IFD1 exists.
+//! chunks, HEIF `Exif` and XMP items, and in EXIF only IFD0, the Exif IFD
+//! and whether IFD1 exists.
 
+use std::cell::Cell;
 use std::fmt;
 
 /// A kind of metadata found in the input and not in the output.
@@ -102,6 +104,8 @@ pub fn scan(bytes: &[u8]) -> Option<Vec<Removed>> {
         scan_png(bytes, &mut found);
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         scan_webp(bytes, &mut found);
+    } else if is_heif(bytes) {
+        scan_heif(bytes, &mut found);
     } else {
         return None;
     }
@@ -110,12 +114,17 @@ pub fn scan(bytes: &[u8]) -> Option<Vec<Removed>> {
     Some(found)
 }
 
+/// `n` bytes at `i`, never overflowing.
+fn get(b: &[u8], i: usize, n: usize) -> Option<&[u8]> {
+    b.get(i..i.checked_add(n)?)
+}
+
 fn be16(b: &[u8], i: usize) -> Option<usize> {
-    Some(u16::from_be_bytes(b.get(i..i + 2)?.try_into().ok()?) as usize)
+    Some(u16::from_be_bytes(get(b, i, 2)?.try_into().ok()?) as usize)
 }
 
 fn be32(b: &[u8], i: usize) -> Option<usize> {
-    Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?) as usize)
+    Some(u32::from_be_bytes(get(b, i, 4)?.try_into().ok()?) as usize)
 }
 
 fn scan_jpeg(b: &[u8], found: &mut Vec<Removed>) {
@@ -153,7 +162,7 @@ fn scan_jpeg(b: &[u8], found: &mut Vec<Removed>) {
 
 fn scan_png(b: &[u8], found: &mut Vec<Removed>) {
     let mut i = 8;
-    while let (Some(len), Some(kind)) = (be32(b, i), b.get(i + 4..i + 8)) {
+    while let (Some(len), Some(kind)) = (be32(b, i), get(b, i.saturating_add(4), 4)) {
         let data = &b[(i + 8).min(b.len())..(i + 8).saturating_add(len).min(b.len())];
         match kind {
             b"iTXt" if data.starts_with(b"XML:com.adobe.xmp\0") => found.push(Removed::Xmp),
@@ -170,7 +179,7 @@ fn scan_png(b: &[u8], found: &mut Vec<Removed>) {
 
 fn scan_webp(b: &[u8], found: &mut Vec<Removed>) {
     let mut i = 12;
-    while let (Some(kind), Some(len)) = (b.get(i..i + 4), b.get(i + 4..i + 8)) {
+    while let (Some(kind), Some(len)) = (get(b, i, 4), get(b, i.saturating_add(4), 4)) {
         let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
         let data = &b[(i + 8).min(b.len())..(i + 8).saturating_add(len).min(b.len())];
         match kind {
@@ -181,6 +190,243 @@ fn scan_webp(b: &[u8], found: &mut Vec<Removed>) {
         }
         i = i.saturating_add(8).saturating_add(len + (len & 1));
     }
+}
+
+/// ISOBMFF boxes in `b` as (type, payload). Payloads are cut at the end
+/// of `b`, and a box that runs past the end is the last one; a box with
+/// a bad size ends the walk.
+fn boxes(b: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let size = be32(b, i)?;
+        let kind = get(b, i.checked_add(4)?, 4)?;
+        let (start, size) = match size {
+            0 => (i.checked_add(8)?, b.len() - i),
+            1 => (
+                i.checked_add(16)?,
+                usize::try_from(be64(b, i.checked_add(8)?)?).ok()?,
+            ),
+            n => (i.checked_add(8)?, n),
+        };
+        let end = i.checked_add(size)?;
+        if end < start {
+            return None;
+        }
+        let data = &b[start.min(b.len())..end.min(b.len())];
+        i = if end > b.len() { usize::MAX } else { end };
+        Some((kind, data))
+    })
+}
+
+fn be64(b: &[u8], i: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(get(b, i, 8)?.try_into().ok()?))
+}
+
+/// An `iloc` offset, length or base offset field: 0, 4 or 8 bytes.
+fn uint(b: &[u8], i: usize, size: usize) -> Option<usize> {
+    match size {
+        0 => Some(0),
+        4 => be32(b, i),
+        8 => usize::try_from(be64(b, i)?).ok(),
+        _ => None,
+    }
+}
+
+const HEIF_BRANDS: &[&[u8]] = &[
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"mif2", b"msf1",
+];
+
+/// At most this many `Exif` items are read. Real files have one.
+const MAX_EXIF_ITEMS: usize = 8;
+/// At most this many `iloc` extents are read, for all items together.
+const MAX_EXTENTS: usize = 1000;
+/// An `Exif` item larger than this is reported, not read.
+const MAX_EXIF_BYTES: usize = 1 << 20;
+
+/// An `ftyp` box with a HEIF brand and no AVIF brand (AVIF is not scanned).
+fn is_heif(b: &[u8]) -> bool {
+    let Some((b"ftyp", ftyp)) = boxes(b).next() else {
+        return false;
+    };
+    let brands: Vec<&[u8]> = ftyp
+        .get(..4)
+        .into_iter()
+        .chain(
+            ftyp.get(8..)
+                .unwrap_or(&[])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| c.as_slice()),
+        )
+        .collect();
+    !brands.iter().any(|b| *b == b"avif" || *b == b"avis")
+        && brands.iter().any(|b| HEIF_BRANDS.contains(b))
+}
+
+fn tick(steps: &Cell<usize>) {
+    steps.set(steps.get() + 1);
+}
+
+/// Reads the top-level `meta` box: `Exif` items are scanned like other
+/// EXIF, `mime` items with RDF/XML are XMP. Only the first `iinf` and
+/// `iloc` count. Returns the loop steps taken, which are bounded by the
+/// size of `b` and the caps above.
+fn scan_heif(b: &[u8], found: &mut Vec<Removed>) -> usize {
+    let steps = Cell::new(0);
+    let Some((_, meta)) = boxes(b)
+        .inspect(|_| tick(&steps))
+        .find(|(kind, _)| *kind == b"meta")
+    else {
+        return steps.get();
+    };
+    let (mut iinf, mut iloc, mut idat) = (None, None, None);
+    for (kind, data) in boxes(meta.get(4..).unwrap_or(&[])) {
+        tick(&steps);
+        let slot = match kind {
+            b"iinf" => &mut iinf,
+            b"iloc" => &mut iloc,
+            b"idat" => &mut idat,
+            _ => continue,
+        };
+        slot.get_or_insert(data);
+    }
+    let exif_items = iinf.map_or_else(Vec::new, |i| scan_iinf(i, found, &steps));
+    let extents = iloc.map_or_else(Vec::new, |l| iloc_extents(l, &exif_items, &steps));
+    for id in exif_items {
+        let data = item_data(b, idat.unwrap_or(&[]), &extents, id);
+        // The payload starts with the offset of the TIFF header.
+        let tiff = data
+            .as_deref()
+            .and_then(|d| d.get(be32(d, 0)?.checked_add(4)?..));
+        match tiff {
+            Some(t) => scan_exif(t, found),
+            None => found.push(Removed::OtherExif),
+        }
+    }
+    steps.get()
+}
+
+/// Item infos (`infe` version 2 and 3): returns up to `MAX_EXIF_ITEMS`
+/// distinct `Exif` item IDs and reports XMP `mime` items.
+fn scan_iinf(b: &[u8], found: &mut Vec<Removed>, steps: &Cell<usize>) -> Vec<usize> {
+    let mut exif_items = Vec::new();
+    let start = if b.first() == Some(&0) { 6 } else { 8 };
+    for (kind, e) in boxes(b.get(start..).unwrap_or(&[])).take(MAX_ENTRIES) {
+        tick(steps);
+        let version = e.first().copied().unwrap_or(0);
+        if kind != b"infe" || version < 2 {
+            continue;
+        }
+        let (id, at) = if version == 2 {
+            (be16(e, 4), 8)
+        } else {
+            (be32(e, 4), 10)
+        };
+        match (id, e.get(at..at + 4)) {
+            (Some(id), Some(b"Exif")) => {
+                if exif_items.len() < MAX_EXIF_ITEMS && !exif_items.contains(&id) {
+                    exif_items.push(id);
+                }
+            }
+            (_, Some(b"mime")) => {
+                let content_type = e.get(at + 4..).unwrap_or(&[]);
+                if content_type.starts_with(b"application/rdf+xml\0") {
+                    found.push(Removed::Xmp);
+                }
+            }
+            _ => {}
+        }
+    }
+    exif_items
+}
+
+/// One pass over `iloc`: the extents of the `wanted` items as (item ID,
+/// construction method, start, length). An item whose entry is cut off
+/// is left out. Reads at most `MAX_ENTRIES` items and `MAX_EXTENTS`
+/// extents.
+fn iloc_extents(
+    iloc: &[u8],
+    wanted: &[usize],
+    steps: &Cell<usize>,
+) -> Vec<(usize, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let _ = (|| -> Option<()> {
+        let version = *iloc.first()?;
+        let sizes = be16(iloc, 4)?;
+        let (off_size, len_size) = (sizes >> 12, (sizes >> 8) & 0xf);
+        let (base_size, index_size) = ((sizes >> 4) & 0xf, sizes & 0xf);
+        let index_size = if version > 0 { index_size } else { 0 };
+        let mut i = 6;
+        let id_at = |i: usize| {
+            if version < 2 {
+                be16(iloc, i).map(|v| (v, i + 2))
+            } else {
+                be32(iloc, i).map(|v| (v, i + 4))
+            }
+        };
+        let (count, next) = id_at(i)?;
+        i = next;
+        let mut extents_left = MAX_EXTENTS;
+        for _ in 0..count.min(MAX_ENTRIES) {
+            tick(steps);
+            let (item, next) = id_at(i)?;
+            i = next;
+            let method = if version == 0 {
+                0
+            } else {
+                i += 2;
+                be16(iloc, i - 2)? & 0xf
+            };
+            i += 2;
+            let base = uint(iloc, i, base_size)?;
+            i += base_size;
+            let extents = be16(iloc, i)?;
+            i += 2;
+            let mut item_extents = Vec::new();
+            for _ in 0..extents {
+                extents_left = extents_left.checked_sub(1)?;
+                tick(steps);
+                i += index_size;
+                let off = uint(iloc, i, off_size)?;
+                i += off_size;
+                let len = uint(iloc, i, len_size)?;
+                i += len_size;
+                if wanted.contains(&item) {
+                    item_extents.push((item, method, base.checked_add(off)?, len));
+                }
+            }
+            out.extend(item_extents);
+        }
+        Some(())
+    })();
+    out
+}
+
+/// The bytes of item `id`: in the file (construction method 0) or in
+/// `idat` (method 1). `None` if it has no extents, uses another method,
+/// points outside its source or is larger than `MAX_EXIF_BYTES`.
+fn item_data(
+    file: &[u8],
+    idat: &[u8],
+    extents: &[(usize, usize, usize, usize)],
+    id: usize,
+) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut any = false;
+    for &(_, method, start, len) in extents.iter().filter(|e| e.0 == id) {
+        let src = match method {
+            0 => file,
+            1 => idat,
+            _ => return None,
+        };
+        if data.len().saturating_add(len) > MAX_EXIF_BYTES {
+            return None;
+        }
+        data.extend_from_slice(get(src, start, len)?);
+        any = true;
+    }
+    any.then_some(data)
 }
 
 const MAX_ENTRIES: usize = 1000;
@@ -253,6 +499,7 @@ fn scan_exif(t: &[u8], found: &mut Vec<Removed>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// Big-endian TIFF: IFD0 with Make and a GPS pointer, then IFD1.
     fn tiff() -> Vec<u8> {
@@ -350,6 +597,221 @@ mod tests {
             []
         );
         assert_eq!(scan(b"ftypavif"), None);
+    }
+
+    fn bx(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        [
+            &((data.len() + 8) as u32).to_be_bytes(),
+            kind.as_slice(),
+            data,
+        ]
+        .concat()
+    }
+
+    /// HEIF with an Exif item stored in `idat` (construction method 1) and
+    /// an XMP `mime` item.
+    fn heif() -> Vec<u8> {
+        let exif = [&6u32.to_be_bytes(), b"Exif\0\0".as_slice(), &tiff()].concat();
+        let infe = |id: u8, kind: &[u8; 4], rest: &[u8]| {
+            bx(
+                b"infe",
+                &[&[2, 0, 0, 0, 0, id, 0, 0], kind.as_slice(), rest].concat(),
+            )
+        };
+        let iinf = bx(
+            b"iinf",
+            &[
+                [0, 0, 0, 0, 0, 2].as_slice(),
+                &infe(1, b"Exif", b""),
+                &infe(2, b"mime", b"application/rdf+xml\0"),
+            ]
+            .concat(),
+        );
+        // Version 1, offset and length 4 bytes, no base offset, one item:
+        // id 1, method 1, one extent at 0 of the Exif length.
+        let iloc = bx(
+            b"iloc",
+            &[
+                [1, 0, 0, 0, 0x44, 0x00, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1].as_slice(),
+                &0u32.to_be_bytes(),
+                &(exif.len() as u32).to_be_bytes(),
+            ]
+            .concat(),
+        );
+        let meta = bx(
+            b"meta",
+            &[[0, 0, 0, 0].as_slice(), &iinf, &iloc, &bx(b"idat", &exif)].concat(),
+        );
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    #[test]
+    fn heif_kinds() {
+        assert_eq!(
+            scan(&heif()).unwrap(),
+            [
+                Removed::Location,
+                Removed::Camera,
+                Removed::Thumbnail,
+                Removed::Xmp
+            ]
+        );
+    }
+
+    #[test]
+    fn heif_without_meta_has_nothing() {
+        assert_eq!(scan(&bx(b"ftyp", b"heic\0\0\0\0mif1heic")).unwrap(), []);
+    }
+
+    #[test]
+    fn heif_garbage_does_not_panic() {
+        let h = heif();
+        for n in 0..h.len() {
+            scan(&h[..n]);
+        }
+        let mut bad = h.clone();
+        for i in 0..bad.len() {
+            bad[i] ^= 0xff;
+            scan(&bad);
+            bad[i] ^= 0xff;
+        }
+        let huge = [
+            bx(b"ftyp", b"mif1\0\0\0\0heic"),
+            b"\xff\xff\xff\xffmeta\0".to_vec(),
+        ]
+        .concat();
+        assert!(scan(&huge).is_some());
+        let large = [
+            bx(b"ftyp", b"heic\0\0\0\0"),
+            b"\0\0\0\x01meta\xff\xff\xff\xff\xff\xff\xff\xff".to_vec(),
+        ]
+        .concat();
+        assert!(scan(&large).is_some());
+    }
+
+    #[test]
+    fn heif_largesize_near_the_end_of_memory_does_not_panic() {
+        let ftyp = bx(b"ftyp", b"heic\0\0\0\0mif1heic");
+        let large = u64::MAX - 1 - ftyp.len() as u64;
+        let h = [
+            ftyp.as_slice(),
+            b"\0\0\0\x01free",
+            &large.to_be_bytes(),
+            &[0; 8],
+        ]
+        .concat();
+        assert!(scan(&h).is_some());
+    }
+
+    /// The most loop steps `scan_heif` may take on `len` bytes: every box
+    /// is at least 8 bytes, the rest is capped.
+    fn work_bound(len: usize) -> usize {
+        2 * (len / 8 + 1) + 2 * MAX_ENTRIES + MAX_EXTENTS
+    }
+
+    /// Many `iinf` boxes full of distinct `Exif` items, and an `iloc` with
+    /// many items of 65535 zero-size extents each.
+    fn hostile_heif() -> Vec<u8> {
+        let mut infes = vec![0, 0, 0, 0, 0xff, 0xff];
+        for id in 0..1000u16 {
+            let mut e = vec![2, 0, 0, 0];
+            e.extend_from_slice(&id.to_be_bytes());
+            e.extend_from_slice(&[0, 0]);
+            e.extend_from_slice(b"Exif");
+            infes.extend(bx(b"infe", &e));
+        }
+        let iinf = bx(b"iinf", &infes);
+        let mut iloc = vec![1, 0, 0, 0, 0x00, 0x00, 0x03, 0xe8];
+        for id in 0..1000u16 {
+            iloc.extend_from_slice(&id.to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff]);
+        }
+        let mut meta = vec![0, 0, 0, 0];
+        for _ in 0..20 {
+            meta.extend_from_slice(&iinf);
+        }
+        meta.extend(bx(b"iloc", &iloc));
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), bx(b"meta", &meta)].concat()
+    }
+
+    #[test]
+    fn hostile_heif_work_is_bounded() {
+        let h = hostile_heif();
+        let mut found = Vec::new();
+        let steps = scan_heif(&h, &mut found);
+        assert!(steps <= work_bound(h.len()), "{steps} steps");
+        assert_eq!(found, [Removed::OtherExif; MAX_EXIF_ITEMS]);
+    }
+
+    #[test]
+    fn uint_takes_only_iloc_field_sizes() {
+        let b = [1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(uint(&b, 0, 0), Some(0));
+        assert_eq!(uint(&b, 0, 4), Some(0x01020304));
+        assert_eq!(uint(&b, 0, 8), Some(0x0102030405060708));
+        assert_eq!(uint(&b, 0, 2), None);
+        assert_eq!(uint(&b, usize::MAX - 1, 4), None);
+    }
+
+    fn heif_box() -> impl Strategy<Value = Vec<u8>> {
+        let kind = prop_oneof![
+            Just(*b"meta"),
+            Just(*b"iinf"),
+            Just(*b"infe"),
+            Just(*b"iloc"),
+            Just(*b"idat"),
+            any::<[u8; 4]>(),
+        ];
+        let size = prop_oneof![Just(None), Just(Some(0u32)), any::<u32>().prop_map(Some),];
+        let large = prop_oneof![
+            Just(None),
+            any::<u64>().prop_map(Some),
+            Just(Some(u64::MAX))
+        ];
+        let payload = prop::collection::vec(
+            prop_oneof![Just(0u8), Just(0xff), Just(0x44), Just(2), any::<u8>()],
+            0..64,
+        );
+        let leaf = (kind, size, large, payload).prop_map(|(kind, size, large, payload)| {
+            match (size, large) {
+                (None, _) => bx(&kind, &payload),
+                (Some(_), Some(l)) => [
+                    &1u32.to_be_bytes(),
+                    kind.as_slice(),
+                    &l.to_be_bytes(),
+                    &payload,
+                ]
+                .concat(),
+                (Some(n), None) => [&n.to_be_bytes(), kind.as_slice(), &payload].concat(),
+            }
+        });
+        leaf.prop_recursive(3, 64, 8, |inner| {
+            (
+                prop_oneof![Just(*b"meta"), Just(*b"iinf"), Just(*b"iloc")],
+                any::<[u8; 4]>(),
+                prop::collection::vec(inner, 0..8),
+            )
+                .prop_map(|(kind, head, children)| {
+                    bx(&kind, &[head.as_slice(), &children.concat()].concat())
+                })
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn random_heif_boxes_do_not_panic(boxes in prop::collection::vec(heif_box(), 0..8)) {
+            let h = [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), boxes.concat()].concat();
+            let mut found = Vec::new();
+            let steps = scan_heif(&h, &mut found);
+            prop_assert!(steps <= work_bound(h.len()), "{} steps", steps);
+            scan(&h);
+        }
+    }
+
+    #[test]
+    fn avif_is_not_scanned_as_heif() {
+        assert_eq!(scan(&bx(b"ftyp", b"avif\0\0\0\0mif1avif")), None);
     }
 
     #[test]

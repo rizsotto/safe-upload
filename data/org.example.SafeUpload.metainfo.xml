@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.example.SafeUpload</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Safe Upload</name>
+  <summary>Clean images before you upload them</summary>
+  <description>
+    <p>
+      Safe Upload removes location, camera and other metadata from images.
+      It shrinks each file to a size you pick, like under 5 MB, and gives it
+      a neutral name. You can paint over parts of the image. The original
+      file is never changed.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/rizsotto/safe-upload</url>
+  <launchable type="desktop-id">org.example.SafeUpload.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+</component>
