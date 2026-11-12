@@ -1,5 +1,11 @@
-//! Fit-to-size search (SPEC 9.3, FR-3, FR-4). Finds the best quality that
+//! Fit-to-size search (SPEC 9.3, FR-3, FR-4). Finds a high quality that
 //! fits the target, and scales the image down when no quality fits.
+//!
+//! JPEG size grows about exponentially with quality, so the search
+//! interpolates on log(size) between a quality that fits and one that does
+//! not (regula falsi), and runs the encodes of each round in parallel.
+//! That usually needs two rounds instead of the 6 or 7 sequential encodes
+//! of a binary search (NFR-1).
 
 use image::imageops::{self, FilterType};
 
@@ -8,10 +14,18 @@ use crate::encode::{Encoder, Pixels};
 
 /// The long edge never goes below this when scaling down to fit.
 pub const MIN_LONG_EDGE: u32 = 640;
-/// Each scale-down step multiplies the scale by this.
-const SCALE_STEP: f64 = 0.85;
-/// At most this many encodes per scale.
-const MAX_STEPS: u32 = 7;
+/// At most this many rounds of encodes per scale: one with the highest
+/// and the lowest quality, then up to two with three guesses each.
+const MAX_ROUNDS: u32 = 3;
+/// Stop searching once the output reaches this share of the target. FR-3
+/// asks for at least 85%.
+const GOOD_ENOUGH: f64 = 0.9;
+/// The interpolation aims a little below the target, so the guess fits
+/// more often.
+const AIM: f64 = 0.97;
+/// Margin on the scale jump, since size is not exactly proportional to
+/// the pixel count.
+const SCALE_MARGIN: f64 = 0.95;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fitted {
@@ -23,64 +37,136 @@ pub struct Fitted {
 
 /// Encodes `px` so the output has at most `target_bytes` bytes. The long
 /// edge is at most `max_long_edge` if given. Never returns more than the
-/// target; if even the smallest allowed size does not fit, returns
-/// [`Error::CannotFit`].
-pub fn fit<E: Encoder + ?Sized>(
+/// target; if even the lowest quality at a 640 px long edge does not fit,
+/// returns [`Error::CannotFit`].
+pub fn fit<E: Encoder + Sync + ?Sized>(
     px: &Pixels,
     target_bytes: u64,
     max_long_edge: Option<u32>,
     encoder: &E,
 ) -> Result<Fitted, Error> {
     let (w, h) = px.image.dimensions();
-    let long_edge = w.max(h);
-    if long_edge == 0 {
+    let long_edge = f64::from(w.max(h));
+    if long_edge == 0.0 {
         return Err(Error::Encode("empty image"));
     }
     let mut scale = match max_long_edge {
-        Some(max) => (f64::from(max) / f64::from(long_edge)).min(1.0),
+        Some(max) => (f64::from(max) / long_edge).min(1.0),
         None => 1.0,
     };
-    let (q_min, q_max) = encoder.quality_range();
+    let floor = (f64::from(MIN_LONG_EDGE) / long_edge).min(scale);
     loop {
         let scaled = resize(px, scale);
-        if let Some(best) = search(&scaled, target_bytes, q_min, q_max, encoder)? {
-            return Ok(best);
-        }
-        scale *= SCALE_STEP;
-        if f64::from(long_edge) * scale < f64::from(MIN_LONG_EDGE) {
+        let smallest = match search(&scaled, target_bytes, encoder)? {
+            Search::Fits(best) => return Ok(best),
+            Search::TooBig { smallest } => smallest,
+        };
+        if scale <= floor {
             return Err(Error::CannotFit { target_bytes });
         }
+        // Size is about proportional to the pixel count, so jump straight
+        // to the scale that should fit at the lowest quality.
+        let jump = (target_bytes as f64 / smallest as f64).sqrt() * SCALE_MARGIN;
+        scale = (scale * jump.min(SCALE_MARGIN)).max(floor);
     }
 }
 
-/// Binary search for the highest quality that fits.
-fn search<E: Encoder + ?Sized>(
+enum Search {
+    Fits(Fitted),
+    /// Even the lowest quality is too big; this is its size.
+    TooBig {
+        smallest: u64,
+    },
+}
+
+/// Finds a high quality that fits at this size. Round one encodes the
+/// highest and the lowest quality; each later round interpolates a guess
+/// and encodes it with two neighbors. The encodes of a round run in
+/// parallel.
+fn search<E: Encoder + Sync + ?Sized>(
     px: &Pixels,
     target: u64,
-    q_min: u8,
-    q_max: u8,
     encoder: &E,
-) -> Result<Option<Fitted>, Error> {
-    let (mut lo, mut hi) = (i32::from(q_min), i32::from(q_max));
-    let mut best = None;
-    let mut steps = 0;
-    while lo <= hi && steps < MAX_STEPS {
-        steps += 1;
-        let q = (lo + hi) / 2;
-        let bytes = encoder.encode(px, q as u8)?;
-        if bytes.len() as u64 <= target {
-            best = Some(Fitted {
-                bytes,
-                width: px.image.width(),
-                height: px.image.height(),
-                quality: q as u8,
-            });
-            lo = q + 1;
+) -> Result<Search, Error> {
+    let (q_min, q_max) = encoder.quality_range();
+    let (q_min, q_max) = (i32::from(q_min), i32::from(q_max.max(q_min)));
+    let fits = |f: &Fitted| f.bytes.len() as u64 <= target;
+    let ln = |f: &Fitted| (f.bytes.len().max(1) as f64).ln();
+
+    let mut round = encode_all(px, encoder, &[q_max, q_min])?;
+    let lowest = round.pop().unwrap();
+    let top = round.pop().unwrap();
+    if fits(&top) {
+        return Ok(Search::Fits(top));
+    }
+    if !fits(&lowest) {
+        return Ok(Search::TooBig {
+            smallest: lowest.bytes.len() as u64,
+        });
+    }
+    let (mut lo_ln, mut hi_ln) = (ln(&lowest), ln(&top));
+    let mut hi = q_max;
+    let mut best = lowest;
+    let aim = (target as f64 * AIM).ln();
+    for _ in 1..MAX_ROUNDS {
+        let lo = i32::from(best.quality);
+        if hi - lo <= 1 || best.bytes.len() as f64 >= GOOD_ENOUGH * target as f64 {
+            break;
+        }
+        let guess = if hi_ln > lo_ln {
+            f64::from(lo) + (aim - lo_ln) / (hi_ln - lo_ln) * f64::from(hi - lo)
         } else {
-            hi = q - 1;
+            f64::from(lo + hi) / 2.0
+        };
+        let guess = guess.floor() as i32;
+        let spread = ((hi - lo) / 8).max(1);
+        let mut qs: Vec<i32> = [guess - spread, guess, guess + spread]
+            .into_iter()
+            .map(|q| q.clamp(lo + 1, hi - 1))
+            .collect();
+        qs.dedup();
+        for out in encode_all(px, encoder, &qs)? {
+            let q = i32::from(out.quality);
+            if fits(&out) {
+                if q > i32::from(best.quality) {
+                    lo_ln = ln(&out);
+                    best = out;
+                }
+            } else if q < hi {
+                hi = q;
+                hi_ln = ln(&out);
+            }
         }
     }
-    Ok(best)
+    // A quality above a failing one may still have fit by chance; only
+    // the size counts.
+    Ok(Search::Fits(best))
+}
+
+/// Encodes at each quality, in parallel.
+fn encode_all<E: Encoder + Sync + ?Sized>(
+    px: &Pixels,
+    encoder: &E,
+    qualities: &[i32],
+) -> Result<Vec<Fitted>, Error> {
+    let encode = |q: i32| -> Result<Fitted, Error> {
+        Ok(Fitted {
+            bytes: encoder.encode(px, q as u8)?,
+            width: px.image.width(),
+            height: px.image.height(),
+            quality: q as u8,
+        })
+    };
+    std::thread::scope(|s| {
+        let handles: Vec<_> = qualities
+            .iter()
+            .map(|&q| s.spawn(move || encode(q)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(Err(Error::Encode("encoder crashed"))))
+            .collect()
+    })
 }
 
 fn resize(px: &Pixels, scale: f64) -> Pixels {
@@ -100,18 +186,18 @@ fn resize(px: &Pixels, scale: f64) -> Pixels {
 mod tests {
     use super::*;
     use image::RgbaImage;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// Output size is width * height * quality / 10 bytes.
     #[derive(Default)]
     struct Fake {
-        calls: RefCell<Vec<(u32, u8)>>,
+        calls: Mutex<Vec<(u32, u8)>>,
     }
 
     impl Encoder for Fake {
         fn encode(&self, px: &Pixels, quality: u8) -> Result<Vec<u8>, Error> {
             let (w, h) = px.image.dimensions();
-            self.calls.borrow_mut().push((w.max(h), quality));
+            self.calls.lock().unwrap().push((w.max(h), quality));
             Ok(vec![0; (w * h * u32::from(quality) / 10) as usize])
         }
         fn extension(&self) -> &'static str {
@@ -137,16 +223,23 @@ mod tests {
 
     #[test]
     fn best_quality_when_everything_fits() {
-        let f = fit(&px(100, 100), 10_000_000, None, &Fake::default()).unwrap();
+        let fake = Fake::default();
+        let f = fit(&px(100, 100), 10_000_000, None, &fake).unwrap();
         assert_eq!(f.quality, 92);
+        // One round: the highest and the lowest quality.
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
     }
 
     #[test]
-    fn at_most_7_encodes_per_scale() {
+    fn two_rounds_when_it_fits_at_full_size() {
         let fake = Fake::default();
         fit(&px(1000, 800), 6_000_000, None, &fake).unwrap();
-        let calls = fake.calls.borrow();
-        assert!(calls.len() <= 7);
+        let calls = fake.calls.lock().unwrap();
+        // The highest and the lowest, then one round of three guesses.
+        let mut first = calls[..2].to_vec();
+        first.sort();
+        assert_eq!(first, [(1000, 40), (1000, 92)]);
+        assert!(calls.len() <= 5, "{calls:?}");
         assert!(calls.iter().all(|&(_, q)| (40..=92).contains(&q)));
     }
 
@@ -158,11 +251,21 @@ mod tests {
         let f = fit(&px(1000, 800), target, None, &fake).unwrap();
         assert!(f.bytes.len() as u64 <= target);
         assert!(f.width < 1000 && f.width >= MIN_LONG_EDGE);
-        // Each step is 85% of the previous scale.
-        let edges: Vec<u32> = fake.calls.borrow().iter().map(|c| c.0).collect();
+        // One jump: sqrt(2.0 / 3.2) * 0.95 of the size.
+        let edges: Vec<u32> = fake.calls.lock().unwrap().iter().map(|c| c.0).collect();
         let mut distinct = edges.clone();
         distinct.dedup();
-        assert_eq!(distinct, [1000, 850, 722]);
+        assert_eq!(distinct, [1000, 751]);
+        assert_eq!((f.width, f.height), (751, 601));
+    }
+
+    #[test]
+    fn a_jump_below_the_floor_still_tries_the_floor() {
+        // Quality 40 fits exactly at 640x512.
+        let fake = Fake::default();
+        let target = 640 * 512 * 4;
+        let f = fit(&px(1000, 800), target, None, &fake).unwrap();
+        assert_eq!((f.width, f.height, f.quality), (640, 512, 40));
     }
 
     #[test]
@@ -170,11 +273,12 @@ mod tests {
         let fake = Fake::default();
         let err = fit(&px(1000, 800), 1000, None, &fake).unwrap_err();
         assert!(matches!(err, Error::CannotFit { target_bytes: 1000 }));
-        assert!(fake.calls.borrow().iter().all(|c| c.0 >= MIN_LONG_EDGE));
+        let edges: Vec<u32> = fake.calls.lock().unwrap().iter().map(|c| c.0).collect();
+        assert_eq!(edges, [1000, 1000, 640, 640]);
         // An image already smaller than the floor is not scaled at all.
         let fake = Fake::default();
         assert!(fit(&px(300, 200), 10, None, &fake).is_err());
-        assert!(fake.calls.borrow().iter().all(|c| c.0 == 300));
+        assert!(fake.calls.lock().unwrap().iter().all(|c| c.0 == 300));
     }
 
     #[test]

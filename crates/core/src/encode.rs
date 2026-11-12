@@ -120,6 +120,9 @@ fn encode_jpeg(image: &RgbaImage, quality: u8, icc: Option<&[u8]>) -> Result<Vec
         let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
         c.set_size(w as usize, h as usize);
         c.set_quality(f32::from(quality));
+        // Trying many progressive scan scripts costs about 1.8x the time
+        // for a few percent of size (NFR-1).
+        c.set_optimize_scans(false);
         let mut c = c.start_compress(Vec::new())?;
         if let Some(icc) = icc {
             write_jpeg_icc(&mut c, icc);

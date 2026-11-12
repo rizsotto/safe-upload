@@ -251,23 +251,26 @@ Dropping a Display P3 profile (common on phones) without converting makes colors
 ```
 input: pixels, target_bytes, max_long_edge (optional), format
 scale = min(1.0, max_long_edge / long_edge)
+floor = min(scale, MIN_LONG_EDGE (640) / long_edge)
 loop:
     img = resize(pixels, scale)            # Lanczos3
-    # binary search quality q in [Q_MIN, Q_MAX] (JPEG: 40..92)
-    best = None
-    lo, hi = Q_MIN, Q_MAX
-    while lo <= hi (max 7 steps):
-        q = (lo + hi) / 2
-        out = encode(img, q)
-        if len(out) <= target_bytes: best = out; lo = q + 1
-        else: hi = q - 1
-    if best and len(best) >= 0.85 * target_bytes or scale was already reduced: return best
-    if best is None:
-        scale *= 0.85
-        if long_edge * scale < MIN_LONG_EDGE (640): error "cannot fit"
+    # quality range [Q_MIN, Q_MAX]: JPEG 40..92, PNG 40..100 (100 = lossless)
+    round 1: encode Q_MAX and Q_MIN       # in parallel
+    if len(Q_MAX) <= target_bytes: return it
+    if len(Q_MIN) > target_bytes:
+        if scale <= floor: error "cannot fit"
+        # size is about proportional to the pixel count
+        scale = max(floor, scale * min(0.95, 0.95 * sqrt(target_bytes / len(Q_MIN))))
         continue
+    best = Q_MIN; hi = Q_MAX
+    rounds 2 and 3, while hi - best.q > 1 and len(best) < 0.9 * target_bytes:
+        # regula falsi on log(size): JPEG size grows about exponentially with q
+        g = best.q + (ln(0.97 * target) - ln(len(best))) / (ln(len(hi)) - ln(len(best))) * (hi - best.q)
+        encode g - d, g, g + d, clamped into (best.q, hi), d = max(1, (hi - best.q) / 8)   # in parallel
+        best = the highest quality that fits; hi = the lowest quality above it that does not
     return best
 ```
+The search never returns a file above the target. It usually takes two rounds, instead of the 6 or 7 sequential encodes of a binary search (NFR-1).
 - PNG input with transparency → output PNG. Fit by quantizing (`imagequant`) and then scaling. If that fails, tell the user, or offer WebP if they allow it.
 - PNG input without transparency → JPEG by default (much smaller for photos).
 - Cache encodes so the UI preview does not encode twice.
