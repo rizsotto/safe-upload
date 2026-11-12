@@ -284,9 +284,16 @@ impl EditModel {
 - On screen, each area shows the core-redacted preview clipped to the
   exact model rect (preview rects round outward, the clip cuts them back),
   so an area is never drawn smaller or larger than in the model.
+- Pixelate on the preview uses core's full-size block scaled to the
+  preview (`edit::apply_preview`), so it looks as coarse as the output,
+  with noise seeded per area so it does not flicker. The output keeps
+  fresh random noise.
+- The description updates after discrete actions and when a drag or held
+  arrow ends, not on every step.
 - Toolbar (in the widget, so it is reusable): linked `gtk::ToggleButton`s
-  Box, Pixelate, Blur, Crop with icons, text tooltips and accessible
-  labels; Undo, Redo, Delete buttons.
+  Box, Pixelate, Blur, Crop with visible text labels (no icons), text
+  tooltips that name the shortcut, and accessible labels; Undo, Redo,
+  Delete buttons.
 - Warning: when Pixelate or Blur is the tool, or a pixelate/blur area is
   selected, an inline label (role `alert` is not needed; a visible label
   with `gtk::AccessibleRelation::DescribedBy` from the tool buttons) shows
@@ -300,8 +307,8 @@ impl EditModel {
 - Keyboard-only drawing (NFR-4): `Enter` on the canvas with no selection
   adds a new area of the current tool in the center (a quarter of the
   view). Arrow keys move the selected area (10 px of the view, `Alt` for 1
-  px), `Shift`+arrows resize, `Tab`/`Shift+Tab` (inside the canvas) cycle
-  areas, `Escape` deselects, then leaves the canvas focus. For Crop, the
+  px), `Shift`+arrows resize, `Tab`/`Shift+Tab` (inside the canvas) step
+  through the areas once, then leave the canvas (no wrap), `Escape` deselects, then leaves the canvas focus. For Crop, the
   same keys edit the crop rectangle.
 - Accessibility: the canvas is focusable, role `Img`, label "Image to
   redact", and a description kept up to date: "3 areas: 2 boxes, 1

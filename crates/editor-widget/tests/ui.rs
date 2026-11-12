@@ -26,7 +26,8 @@ fn editor(
 ) -> (gtk::Window, RedactionEditor) {
     let ed = RedactionEditor::new();
     let img = RgbaImage::from_pixel(preview.0, preview.1, Rgba([GRAY, GRAY, GRAY, 255]));
-    ed.load(img, model.unwrap_or_else(|| EditModel::new(full.0, full.1)));
+    ed.load(img, model.unwrap_or_else(|| EditModel::new(full.0, full.1)))
+        .unwrap();
     let win = gtk::Window::new();
     win.set_default_size(900, 600);
     win.set_child(Some(&ed));
@@ -354,7 +355,7 @@ fn pixelate_preview_changes_pixels_inside_only() {
     let ed = RedactionEditor::new();
     // A gradient, so averaging blocks changes it.
     let img = RgbaImage::from_fn(200, 100, |x, _| Rgba([x as u8, 100, 100, 255]));
-    ed.load(img, m);
+    ed.load(img, m).unwrap();
     let win = gtk::Window::new();
     win.set_default_size(900, 600);
     win.set_child(Some(&ed));
@@ -490,11 +491,22 @@ fn tab_cycles_and_escape_leaves_the_canvas() {
         Some(&canvas)
     );
     let sel = |ed: &RedactionEditor| ed.model().unwrap().selected();
+    // Tab steps through the areas once, then is not used (so focus
+    // moves on) and the selection is dropped. No wrap.
     assert_eq!(sel(&ed), Some(1));
+    assert!(!ed.handle_key(Key::Tab, M::empty()));
+    assert_eq!(sel(&ed), None);
     assert!(ed.handle_key(Key::Tab, M::empty()));
     assert_eq!(sel(&ed), Some(0));
-    assert!(ed.handle_key(Key::ISO_Left_Tab, M::SHIFT_MASK));
+    assert!(ed.handle_key(Key::Tab, M::empty()));
     assert_eq!(sel(&ed), Some(1));
+    assert!(ed.handle_key(Key::ISO_Left_Tab, M::SHIFT_MASK));
+    assert_eq!(sel(&ed), Some(0));
+    // Shift+Tab before the first area leaves backwards.
+    assert!(!ed.handle_key(Key::ISO_Left_Tab, M::SHIFT_MASK));
+    assert_eq!(sel(&ed), None);
+    assert!(!ed.handle_key(Key::ISO_Left_Tab, M::SHIFT_MASK));
+    assert!(ed.handle_key(Key::Tab, M::empty()));
     assert!(ed.handle_key(Key::Escape, M::empty()));
     assert_eq!(sel(&ed), None);
     assert_eq!(
@@ -556,6 +568,66 @@ fn description_follows_the_edits() {
     assert!(has_description(&canvas, want), "{}", ed.description());
     ed.activate_action("editor.commit", None).unwrap();
     assert!(has_description(&canvas, "1 area: 1 box."));
+    win.destroy();
+}
+
+/// Not on every arrow press or drag motion; once the gesture ends.
+fn description_waits_for_the_gesture_end() {
+    use gdk::Key;
+    use gdk::ModifierType as M;
+    let (win, ed) = editor((1000, 800), (250, 200), None);
+    let canvas = ed.canvas();
+    ed.activate_action("editor.new-area", None).unwrap();
+    let before = "1 area: 1 box. Selected: box 1, 500 by 400 pixels at 250, 200.";
+    assert!(ed.handle_key(Key::Right, M::ALT_MASK));
+    assert!(ed.handle_key(Key::Right, M::ALT_MASK));
+    assert_eq!(ed.description(), before);
+    assert!(has_description(&canvas, before));
+    ed.handle_key_release(Key::Right);
+    let after = "1 area: 1 box. Selected: box 1, 500 by 400 pixels at 252, 200.";
+    assert_eq!(ed.description(), after);
+    assert!(has_description(&canvas, after));
+
+    let v = ed.view();
+    let a = v.to_widget((500.0, 400.0));
+    ed.drag_begin(a.0, a.1);
+    ed.drag_update(30.0, 0.0);
+    ed.drag_update(60.0, 0.0);
+    assert_eq!(ed.description(), after);
+    ed.drag_end(60.0, 0.0);
+    assert_ne!(ed.description(), after);
+    assert!(has_description(&canvas, &ed.description()));
+    win.destroy();
+}
+
+fn load_refuses_a_preview_of_another_shape() {
+    let ed = RedactionEditor::new();
+    let gray = |w, h| RgbaImage::from_pixel(w, h, Rgba([GRAY, GRAY, GRAY, 255]));
+    let err = ed
+        .load(gray(200, 150), EditModel::new(1000, 500))
+        .unwrap_err();
+    assert_eq!((err.preview, err.full), ((200, 150), (1000, 500)));
+    assert!(ed.load(gray(0, 0), EditModel::new(10, 10)).is_err());
+    assert!(ed.model().is_none(), "nothing loaded");
+    // One pixel of rounding is fine.
+    ed.load(gray(200, 133), EditModel::new(3000, 2000)).unwrap();
+    assert_eq!(ed.model().unwrap().size(), (3000, 2000));
+}
+
+fn click_with_the_crop_tool_does_not_select_areas() {
+    let mut m = EditModel::new(200, 100);
+    m.add(AreaKind::Box, Rect::new(20, 20, 40, 30));
+    m.select(None);
+    let (win, ed) = editor((200, 100), (200, 100), Some(m));
+    ed.set_tool(Tool::Crop);
+    let p = ed.view().to_widget((30.5, 30.5));
+    ed.drag_begin(p.0, p.1);
+    ed.drag_end(0.0, 0.0);
+    assert_eq!(ed.model().unwrap().selected(), None);
+    ed.set_tool(Tool::Box);
+    ed.drag_begin(p.0, p.1);
+    ed.drag_end(0.0, 0.0);
+    assert_eq!(ed.model().unwrap().selected(), Some(0));
     win.destroy();
 }
 
@@ -633,6 +705,18 @@ fn main() -> ExitCode {
         (
             "warning_shows_only_for_pixelate",
             warning_shows_only_for_pixelate,
+        ),
+        (
+            "description_waits_for_the_gesture_end",
+            description_waits_for_the_gesture_end,
+        ),
+        (
+            "load_refuses_a_preview_of_another_shape",
+            load_refuses_a_preview_of_another_shape,
+        ),
+        (
+            "click_with_the_crop_tool_does_not_select_areas",
+            click_with_the_crop_tool_does_not_select_areas,
         ),
     ]);
     drop(env);

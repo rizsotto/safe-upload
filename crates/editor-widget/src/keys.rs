@@ -38,8 +38,10 @@ pub struct KeyContext {
     pub scale: f64,
     /// Something to move: the selected area, or the crop with Crop.
     pub has_target: bool,
-    /// Areas that Tab can cycle through.
-    pub has_areas: bool,
+    /// Areas that Tab can step through (none with the Crop tool).
+    pub areas: usize,
+    /// The selected area.
+    pub selected: Option<usize>,
 }
 
 pub fn is_arrow(key: gdk::Key) -> bool {
@@ -91,15 +93,20 @@ pub fn command(key: gdk::Key, mods: gdk::ModifierType, ctx: KeyContext) -> Optio
                 cmd("editor.new-area", None, false)
             }
         }
-        gdk::Key::Tab if mods.is_empty() && ctx.has_areas => cmd("editor.next-area", None, false),
-        gdk::Key::ISO_Left_Tab | gdk::Key::Tab
-            if mods == M::SHIFT_MASK || (key == gdk::Key::ISO_Left_Tab && mods.is_empty()) =>
+        // Tab steps through the areas once, then leaves the canvas;
+        // Shift+Tab from the first area (or none) leaves backwards.
+        gdk::Key::Tab
+            if mods.is_empty()
+                && ctx.areas > 0
+                && ctx.selected.is_none_or(|i| i + 1 < ctx.areas) =>
         {
-            ctx.has_areas.then(|| KeyCommand {
-                action: "editor.previous-area",
-                arg: None,
-                held: false,
-            })
+            cmd("editor.next-area", None, false)
+        }
+        gdk::Key::ISO_Left_Tab | gdk::Key::Tab
+            if (mods == M::SHIFT_MASK || (key == gdk::Key::ISO_Left_Tab && mods.is_empty()))
+                && ctx.selected.is_some_and(|i| i > 0 && i < ctx.areas) =>
+        {
+            cmd("editor.previous-area", None, false)
         }
         gdk::Key::Escape => cmd("editor.cancel", None, false),
         _ => None,
@@ -115,7 +122,8 @@ mod tests {
     const CTX: KeyContext = KeyContext {
         scale: 0.5,
         has_target: true,
-        has_areas: true,
+        areas: 3,
+        selected: Some(1),
     };
 
     fn action(key: Key, mods: M, ctx: KeyContext) -> Option<(&'static str, Option<(i32, i32)>)> {
@@ -162,7 +170,8 @@ mod tests {
         let none = M::empty();
         let empty = KeyContext {
             has_target: false,
-            has_areas: false,
+            areas: 0,
+            selected: None,
             ..CTX
         };
         assert_eq!(
@@ -181,6 +190,16 @@ mod tests {
             action(Key::ISO_Left_Tab, M::SHIFT_MASK, CTX),
             Some(("editor.previous-area", None))
         );
+        // No wrap: Tab after the last area and Shift+Tab before the
+        // first leave the canvas.
+        let at = |selected| KeyContext { selected, ..CTX };
+        assert_eq!(
+            action(Key::Tab, none, at(None)),
+            Some(("editor.next-area", None))
+        );
+        assert_eq!(action(Key::Tab, none, at(Some(2))), None);
+        assert_eq!(action(Key::ISO_Left_Tab, M::SHIFT_MASK, at(Some(0))), None);
+        assert_eq!(action(Key::ISO_Left_Tab, M::SHIFT_MASK, at(None)), None);
         // No areas: Tab leaves the canvas.
         assert_eq!(action(Key::Tab, none, empty), None);
         assert_eq!(action(Key::ISO_Left_Tab, M::SHIFT_MASK, empty), None);

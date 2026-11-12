@@ -73,8 +73,8 @@ mod imp {
         pub(super) tool: Cell<Tool>,
         pub(super) base: RefCell<Option<gdk::Texture>>,
         pub(super) preview: RefCell<Option<RgbaImage>>,
-        /// `None` with a loaded preview means core could not redact it;
-        /// areas are then drawn solid black.
+        /// `None` before a preview is loaded; areas are then drawn solid
+        /// black.
         pub(super) edited: RefCell<Option<gdk::Texture>>,
         pub(super) drag: Cell<Option<Drag>>,
         pub(super) toolbar: RefCell<Option<gtk::Box>>,
@@ -372,6 +372,34 @@ fn drawn_rect(
     Some(r)
 }
 
+/// The preview does not have the image's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadError {
+    pub preview: (u32, u32),
+    pub full: (u32, u32),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {}x{} preview does not match the {}x{} image",
+            self.preview.0, self.preview.1, self.full.0, self.full.1
+        )
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// Each preview side is within 1 px of the full side scaled by the other.
+pub(crate) fn aspect_matches((pw, ph): (u32, u32), (fw, fh): (u32, u32)) -> bool {
+    if pw == 0 || ph == 0 || fw == 0 || fh == 0 {
+        return false;
+    }
+    let (pw, ph, fw, fh) = (f64::from(pw), f64::from(ph), f64::from(fw), f64::from(fh));
+    (ph - fh * pw / fw).abs() <= 1.0 && (pw - fw * ph / fh).abs() <= 1.0
+}
+
 fn snapshot_of(m: &EditModel) -> (Vec<Area>, Option<Rect>) {
     (m.areas().to_vec(), m.crop())
 }
@@ -383,10 +411,18 @@ impl RedactionEditor {
 
     /// Shows `preview` (the downscaled, oriented sRGB pixels) and edits
     /// `model`, whose size is the full oriented size. Selection and undo
-    /// history come with the model.
-    pub fn load(&self, preview: RgbaImage, model: EditModel) {
-        let imp = self.imp();
+    /// history come with the model. Fails if the preview is empty or its
+    /// aspect ratio is not the model's (allowing 1 px of rounding), since
+    /// areas would then be drawn in the wrong place.
+    pub fn load(&self, preview: RgbaImage, model: EditModel) -> Result<(), LoadError> {
         let (w, h) = preview.dimensions();
+        if !aspect_matches((w, h), model.size()) {
+            return Err(LoadError {
+                preview: (w, h),
+                full: model.size(),
+            });
+        }
+        let imp = self.imp();
         let bytes = glib::Bytes::from(preview.as_raw().as_slice());
         let texture = gdk::MemoryTexture::new(
             w as i32,
@@ -401,6 +437,7 @@ impl RedactionEditor {
         imp.model.replace(Some(model));
         self.refresh_preview();
         self.update_state();
+        Ok(())
     }
 
     /// A copy of the edit model.
@@ -482,6 +519,7 @@ impl RedactionEditor {
                 return;
             }
             d.active = true;
+            self.imp().drag.set(Some(d));
             self.edit(|m| m.begin_gesture());
         }
         let view = self.view();
@@ -547,6 +585,10 @@ impl RedactionEditor {
             self.edit(|m| m.end_gesture());
             return;
         }
+        if self.tool() == Tool::Crop {
+            // Area selection is not shown with the Crop tool.
+            return;
+        }
         let p = self.view().to_image(d.start);
         self.edit(|m| {
             let hit = m.areas().iter().rposition(|a| contains(a.rect, p));
@@ -561,11 +603,20 @@ impl RedactionEditor {
         let Some(ctx) = self.with_model(|m| KeyContext {
             scale,
             has_target: self.target(m).is_some(),
-            has_areas: self.tool() != Tool::Crop && !m.areas().is_empty(),
+            areas: if self.tool() == Tool::Crop {
+                0
+            } else {
+                m.areas().len()
+            },
+            selected: m.selected(),
         }) else {
             return false;
         };
         let Some(cmd) = keys::command(key, mods, ctx) else {
+            if matches!(key, gdk::Key::Tab | gdk::Key::ISO_Left_Tab) {
+                // Focus moves on: done with the selection.
+                self.commit();
+            }
             return false;
         };
         if cmd.held && !self.imp().key_held.replace(true) {
@@ -763,7 +814,7 @@ impl RedactionEditor {
             let preview = imp.preview.borrow();
             let model = imp.model.borrow();
             match (preview.as_ref(), model.as_ref()) {
-                (Some(p), Some(m)) => preview::render(p, m).ok().map(|img| {
+                (Some(p), Some(m)) => Some(preview::render(p, m)).map(|img| {
                     let (w, h) = img.dimensions();
                     gdk::MemoryTexture::new(
                         w as i32,
@@ -801,7 +852,10 @@ impl RedactionEditor {
         if let Some(w) = imp.warning.borrow().as_ref() {
             w.set_visible(warn);
         }
-        if *imp.description.borrow() != text {
+        // Not on every drag motion or arrow press: screen readers would
+        // read each step. The gesture end updates it.
+        let in_gesture = imp.key_held.get() || imp.drag.get().is_some_and(|d| d.active);
+        if !in_gesture && *imp.description.borrow() != text {
             if let Some(c) = imp.canvas.borrow().as_ref() {
                 c.update_property(&[gtk::accessible::Property::Description(&text)]);
             }
@@ -901,4 +955,21 @@ fn outline(
         &[w, w, w, w],
         &[color, color, color, color],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aspect_matches;
+
+    #[test]
+    fn aspect_allows_one_pixel_of_rounding() {
+        assert!(aspect_matches((200, 100), (1000, 500)));
+        assert!(aspect_matches((200, 133), (3000, 2000)));
+        assert!(aspect_matches((2048, 1365), (6000, 4000)));
+        assert!(aspect_matches((1, 1), (1, 1)));
+        assert!(!aspect_matches((200, 150), (1000, 500)));
+        assert!(!aspect_matches((100, 200), (1000, 500)));
+        assert!(!aspect_matches((0, 0), (1000, 500)));
+        assert!(!aspect_matches((10, 10), (0, 10)));
+    }
 }
