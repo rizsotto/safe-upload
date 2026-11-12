@@ -582,6 +582,10 @@ Not verified (each has a task that checks it first):
   acceptance; deferred question).
 - [ ] Drops from Nautilus into the Flatpak on a real desktop (manual, at
   acceptance; the headless tests call the same `add_files` path).
+- [ ] Saving over an original in the Flatpak (manual, T18). The app
+  refuses a chosen file with the same device and inode as an original,
+  but document-portal paths may show other inode numbers, so the guard may
+  not catch it there. Check by hand.
 
 ## Risks
 
