@@ -6,12 +6,12 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use gettextrs::gettext;
 use safe_upload_core::Error;
-use safe_upload_core::verify::verify;
+use safe_upload_core::pipeline::verify_output;
 
 /// One output to save: its file name and its verified bytes.
 #[derive(Debug, Clone)]
@@ -30,6 +30,8 @@ pub enum SaveError {
     SameName(String),
     /// The chosen file is one of the originals.
     Original,
+    /// The chosen file is a symbolic link. Links are never followed.
+    Link,
     /// The bytes failed the check, so nothing was written.
     Verify(Error),
     Io(io::Error),
@@ -48,6 +50,9 @@ impl fmt::Display for SaveError {
             ),
             SaveError::Original => f.write_str(&gettext(
                 "That file is an original image. Choose another name",
+            )),
+            SaveError::Link => f.write_str(&gettext(
+                "That file is a link to another file. Choose another name",
             )),
             SaveError::Verify(_) => f.write_str(&gettext(
                 "The output failed the metadata check. Nothing was written",
@@ -74,31 +79,55 @@ pub fn mime_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Verifies the bytes again (no ICC profile is ever written) and returns
-/// their MIME type.
+/// Verifies the bytes again with core and returns their MIME type.
 pub fn check(bytes: &[u8]) -> Result<&'static str, SaveError> {
-    verify(bytes, None).map_err(SaveError::Verify)?;
+    verify_output(bytes).map_err(SaveError::Verify)?;
     mime_type(bytes).ok_or(SaveError::Verify(Error::Verify("unknown format".into())))
 }
 
 /// Writes one output to the file the user chose in the save dialog. The
-/// dialog already asked before replacing a file; an original is never
-/// replaced.
+/// dialog already asked before replacing a file. An original is never
+/// replaced and a link is never followed. On failure only a file this
+/// call created is removed.
 pub fn save_file(path: &Path, bytes: &[u8], originals: &[PathBuf]) -> Result<(), SaveError> {
     check(bytes)?;
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(SaveError::Link);
+    }
     if is_original(path, originals) {
         return Err(SaveError::Original);
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(path);
+    let (mut file, created) = match open_no_follow(path, true) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            open_no_follow(path, false).map(|f| (f, false))
+        }
+        opened => opened.map(|f| (f, true)),
+    }
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) => SaveError::Link,
+        _ => e.into(),
+    })?;
+    let written = file
+        .set_len(0)
+        .and_then(|()| file.write_all(bytes))
+        .and_then(|()| file.sync_all());
+    if let Err(e) = written {
+        if created {
+            let _ = fs::remove_file(path);
+        }
         return Err(e.into());
     }
     Ok(())
+}
+
+/// Opens `path` for writing without following a final symlink. With
+/// `new`, the file must not exist yet.
+fn open_no_follow(path: &Path, new: bool) -> io::Result<fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(new)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
 }
 
 /// Writes every output into `folder`, all or nothing. Never replaces a

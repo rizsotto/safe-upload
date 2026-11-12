@@ -455,8 +455,29 @@ fn save_one_writes_the_verified_bytes() {
 
     // Choosing the original in the dialog never replaces it.
     let original = files[0].path().unwrap();
-    let err = ctx.block_on(win.save_to_file(original)).unwrap_err();
+    let err = ctx
+        .block_on(win.save_to_file(original.clone()))
+        .unwrap_err();
     assert!(matches!(err, SaveError::Original), "{err}");
+    assert_eq!(win.last_toast().as_deref(), Some(err.to_string().as_str()));
+    let hard = folder.path().join("hard.jpg");
+    fs::hard_link(&original, &hard).unwrap();
+    let err = ctx.block_on(win.save_to_file(hard)).unwrap_err();
+    assert!(matches!(err, SaveError::Original), "{err}");
+
+    // A link is never followed, and the file behind it is left alone.
+    let theirs = folder.path().join("theirs.jpg");
+    fs::write(&theirs, "theirs").unwrap();
+    let link = folder.path().join("link.jpg");
+    std::os::unix::fs::symlink(&theirs, &link).unwrap();
+    let err = ctx.block_on(win.save_to_file(link.clone())).unwrap_err();
+    assert!(matches!(err, SaveError::Link), "{err}");
+    assert_eq!(fs::read(&theirs).unwrap(), b"theirs");
+    assert!(link.is_symlink());
+
+    // Replacing a file the user chose in the dialog is allowed.
+    ctx.block_on(win.save_to_file(theirs.clone())).unwrap();
+    assert_eq!(fs::read(&theirs).unwrap(), out.bytes);
     assert_eq!(snapshot(dir.path()), before);
     win.destroy();
 }
@@ -519,9 +540,21 @@ fn save_batch_to_folder_never_overwrites() {
     win.add_files(&txt);
     wait_idle(&win);
     assert!(!action_enabled(&win, "save"));
-    assert!(
-        ctx.block_on(win.save_to_folder(other.path().into()))
-            .is_err()
+    let err = ctx
+        .block_on(win.save_to_folder(other.path().into()))
+        .unwrap_err();
+    assert!(matches!(err, SaveError::NotReady), "{err}");
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Not every image is ready")
+    );
+    let err = ctx
+        .block_on(win.save_to_file(other.path().join("x.jpg")))
+        .unwrap_err();
+    assert!(matches!(err, SaveError::NotReady), "{err}");
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Not every image is ready")
     );
     assert_eq!(snapshot(other.path()).len(), 1);
     assert_eq!(snapshot(dir.path()), before);
@@ -545,28 +578,61 @@ fn copy_puts_the_verified_bytes_on_the_clipboard() {
     let clipboard = win.clipboard();
     let formats = clipboard.formats();
     assert_eq!(formats.mime_types().as_slice(), ["image/png"]);
-    let ctx = glib::MainContext::default();
-    let (bytes, mime) = ctx.block_on(async {
-        let (stream, mime) = clipboard
-            .read_future(&["image/png"], glib::Priority::DEFAULT)
-            .await
-            .unwrap();
-        let mut all = Vec::new();
-        loop {
-            let chunk = stream
-                .read_bytes_future(64 * 1024, glib::Priority::DEFAULT)
-                .await
-                .unwrap();
-            if chunk.is_empty() {
-                break;
-            }
-            all.extend_from_slice(&chunk);
-        }
-        (all, mime.to_string())
-    });
+    // GDK adds texture types for readers in this process; what we offer
+    // (and what other apps see) is only the bytes under their MIME type.
+    let offered = clipboard.content().unwrap().formats();
+    assert!(offered.types().is_empty(), "{}", offered.to_str());
+    assert_eq!(offered.mime_types(), formats.mime_types());
+    let (bytes, mime) =
+        glib::MainContext::default().block_on(read_clipboard(&clipboard, "image/png"));
     assert_eq!(mime, "image/png");
     assert_eq!(bytes, out.bytes);
     win.destroy();
+}
+
+fn copy_jpeg_keeps_its_mime_type() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let win = new_window();
+    win.add_files(&files);
+    wait_idle(&win);
+    let out = win.model().items()[0].output().unwrap();
+    win.copy().unwrap();
+    assert_eq!(
+        win.last_toast().as_deref(),
+        Some("Copied. Keep Safe Upload open until you paste.")
+    );
+    let clipboard = win.clipboard();
+    let formats = clipboard.formats();
+    assert_eq!(formats.mime_types().as_slice(), ["image/jpeg"]);
+    // GDK adds texture types for readers in this process; what we offer
+    // (and what other apps see) is only the bytes under their MIME type.
+    let offered = clipboard.content().unwrap().formats();
+    assert!(offered.types().is_empty(), "{}", offered.to_str());
+    assert_eq!(offered.mime_types(), formats.mime_types());
+    let (bytes, mime) =
+        glib::MainContext::default().block_on(read_clipboard(&clipboard, "image/jpeg"));
+    assert_eq!(mime, "image/jpeg");
+    assert_eq!(bytes, out.bytes);
+    win.destroy();
+}
+
+async fn read_clipboard(clipboard: &gtk::gdk::Clipboard, mime: &str) -> (Vec<u8>, String) {
+    let (stream, mime) = clipboard
+        .read_future(&[mime], glib::Priority::DEFAULT)
+        .await
+        .unwrap();
+    let mut all = Vec::new();
+    loop {
+        let chunk = stream
+            .read_bytes_future(64 * 1024, glib::Priority::DEFAULT)
+            .await
+            .unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        all.extend_from_slice(&chunk);
+    }
+    (all, mime.to_string())
 }
 
 fn make_stale_folders() {
@@ -686,6 +752,10 @@ fn main() -> ExitCode {
         (
             "copy_puts_the_verified_bytes_on_the_clipboard",
             copy_puts_the_verified_bytes_on_the_clipboard,
+        ),
+        (
+            "copy_jpeg_keeps_its_mime_type",
+            copy_jpeg_keeps_its_mime_type,
         ),
         (
             "missing_weston_fails_with_clear_message",

@@ -1,6 +1,6 @@
 //! The main window (SPEC 6.2, M2 plan "Window").
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
 
 use adw::prelude::*;
@@ -31,6 +31,7 @@ mod imp {
         pub settings: OnceCell<gio::Settings>,
         pub toasts: OnceCell<adw::ToastOverlay>,
         pub saving: Cell<bool>,
+        pub last_toast: RefCell<Option<String>>,
     }
 
     #[glib::object_subclass]
@@ -110,6 +111,7 @@ impl Window {
     }
 
     pub fn toast(&self, text: &str) {
+        self.imp().last_toast.replace(Some(text.to_owned()));
         if let Some(t) = self.imp().toasts.get() {
             t.add_toast(adw::Toast::new(text));
         }
@@ -302,6 +304,11 @@ impl Window {
             .collect()
     }
 
+    /// The text of the last toast, for tests.
+    pub fn last_toast(&self) -> Option<String> {
+        self.imp().last_toast.borrow().clone()
+    }
+
     fn update_actions(&self) {
         let items = self.model().items();
         let ready = items.iter().all(|i| i.output().is_some());
@@ -381,37 +388,46 @@ impl Window {
     }
 
     /// Saves the single output to `path` (the file chosen in the dialog).
+    /// Every outcome is shown as a toast.
     pub async fn save_to_file(&self, path: PathBuf) -> Result<(), SaveError> {
-        let outputs = self.outputs().ok_or(SaveError::NotReady)?;
-        let [out] = outputs.as_slice() else {
-            return Err(SaveError::NotReady);
+        let result = match self.outputs().as_deref() {
+            Some([out]) => {
+                let bytes = out.bytes.clone();
+                let originals = self.originals();
+                self.run_save(move || save::save_file(&path, &bytes, &originals))
+                    .await
+            }
+            _ => Err(SaveError::NotReady),
         };
-        let bytes = out.bytes.clone();
-        let originals = self.originals();
-        let result = self
-            .run_save(move || save::save_file(&path, &bytes, &originals))
-            .await;
-        if result.is_ok() {
-            self.toast(&gettext("Saved 1 image"));
-        }
+        self.toast_result(&result, || gettext("Saved 1 image"));
         result
     }
 
-    /// Saves every output into `folder`, all or nothing.
+    /// Saves every output into `folder`, all or nothing. Every outcome is
+    /// shown as a toast.
     pub async fn save_to_folder(&self, folder: PathBuf) -> Result<usize, SaveError> {
-        let outputs = self.outputs().ok_or(SaveError::NotReady)?;
-        let result = self
-            .run_save(move || save::save_batch(&folder, &outputs))
-            .await;
-        if let Ok(n) = result {
-            let text = ngettext("Saved {} image", "Saved {} images", n as u32);
-            self.toast(&text.replace("{}", &n.to_string()));
-        }
+        let result = match self.outputs() {
+            Some(outputs) => {
+                self.run_save(move || save::save_batch(&folder, &outputs))
+                    .await
+            }
+            None => Err(SaveError::NotReady),
+        };
+        self.toast_result(&result, || {
+            let n = *result.as_ref().unwrap_or(&0);
+            ngettext("Saved {} image", "Saved {} images", n as u32).replace("{}", &n.to_string())
+        });
         result
+    }
+
+    fn toast_result<T>(&self, result: &Result<T, SaveError>, ok: impl FnOnce() -> String) {
+        match result {
+            Ok(_) => self.toast(&ok()),
+            Err(e) => self.toast(&e.to_string()),
+        }
     }
 
     /// Runs a write on a worker thread, so the window stays responsive.
-    /// A failure is shown as a toast.
     async fn run_save<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> Result<T, SaveError> + Send + 'static,
@@ -425,9 +441,6 @@ impl Window {
         });
         self.imp().saving.set(false);
         self.update_actions();
-        if let Err(e) = &result {
-            self.toast(&e.to_string());
-        }
         result
     }
 
