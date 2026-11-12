@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use safe_upload_core::Error;
-use safe_upload_core::output::{MAX_AGE, PrivateDir, remove_stale};
+use safe_upload_core::output::{MAX_AGE, PrivateDir, clean_stale, remove_stale};
 
 /// A fresh fake `$XDG_RUNTIME_DIR` for one test.
 fn fake_runtime_dir(test: &str) -> PathBuf {
@@ -81,6 +81,38 @@ fn symlinked_base_is_refused() {
         Err(Error::UnsafeTempDir)
     ));
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+#[test]
+fn clean_stale_checks_the_base_first() {
+    let rt = fake_runtime_dir("clean-symlink");
+    let elsewhere = rt.join("elsewhere");
+    let old = elsewhere.join("0123456789abcdef0123456789abcdef");
+    fs::create_dir_all(&old).unwrap();
+    set_age(&old, MAX_AGE * 2);
+    symlink(&elsewhere, rt.join("safe-upload")).unwrap();
+    assert!(matches!(clean_stale(&rt), Err(Error::UnsafeTempDir)));
+    assert!(old.exists(), "followed the symlinked base");
+}
+
+#[test]
+fn clean_stale_removes_old_folders() {
+    let rt = fake_runtime_dir("clean");
+    let base = rt.join("safe-upload");
+    let old = base.join("0123456789abcdef0123456789abcdef");
+    let young = base.join("fedcba9876543210fedcba9876543210");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&young).unwrap();
+    set_age(&old, MAX_AGE * 2);
+    fs::set_permissions(&base, Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(clean_stale(&rt).unwrap(), 1);
+    assert!(!old.exists());
+    assert!(young.exists());
+    assert_eq!(mode(&base), 0o700);
+    assert!(matches!(
+        clean_stale(&rt.join("nope")),
+        Err(Error::NoRuntimeDir)
+    ));
 }
 
 #[test]

@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-adw.workspace = true
+adw = { workspace = true, features = ["v1_6"] }
 gettext-rs.workspace = true
 gtk = { workspace = true, features = ["v4_10"] }
 safe-upload-core = { path = "../core" }

@@ -56,7 +56,7 @@ impl GlycinDecoder {
         limits.check_dimensions(details.width(), details.height())?;
         let orientation = Orientation::from_exif(image.transformation_orientation() as u16);
 
-        let frame = block_on(image.next_frame()).map_err(|_| Error::Decode("decoding failed"))?;
+        let frame = block_on(image.next_frame()).map_err(|e| load_error(&e, "decoding failed"))?;
         let (w, h) = (frame.width(), frame.height());
         // The pixel count was checked from the header, before the frame
         // was allocated.
@@ -120,11 +120,30 @@ fn open(bytes: Vec<u8>, limits: &Limits) -> Result<glycin::Image, Error> {
         .color_convert_icc_srgb(false)
         .accepted_memory_formats(MemoryFormatSelection::R8g8b8a8)
         .limits(glycin::Limits::default().timeout(limits.decode_timeout));
-    let image = block_on(loader.load()).map_err(|_| Error::Decode("cannot read the image"))?;
+    let image = block_on(loader.load()).map_err(|e| load_error(&e, "cannot read the image"))?;
     if image.active_sandbox_mechanism() != sandbox {
-        return Err(Error::Decode("the decoder did not run in the sandbox"));
+        return Err(Error::Sandbox("the decoder did not run in the sandbox"));
     }
     Ok(image)
+}
+
+/// Splits glycin errors into "the file is bad" ([`Error::Decode`] with
+/// `bad_file`) and "the sandbox did not work" ([`Error::Sandbox`]). Only
+/// errors the loader itself sent back from inside the sandbox, a format it
+/// does not know, or a timeout blame the file. Everything else (spawn
+/// failures, the loader dying early, D-Bus, seccomp, I/O) is a sandbox
+/// failure. glycin's error kind is private, so its remote errors are known
+/// by their `Display` prefix; `loader_errors_blame_the_file` guards that.
+fn load_error(e: &glycin::Error, bad_file: &'static str) -> Error {
+    if e.unsupported_format().is_some() {
+        Error::Decode("unknown or unsupported image format")
+    } else if e.is_timeout() {
+        Error::Decode("decoding took too long")
+    } else if e.to_string().starts_with("Remote error:") {
+        Error::Decode(bad_file)
+    } else {
+        Error::Sandbox("the decoder failed to start or stopped early")
+    }
 }
 
 /// Refuses formats we do not accept and files that are cut off.
@@ -268,6 +287,24 @@ mod tests {
     fn core_decoder_runs_in_bwrap() {
         let image = open(jpeg(), &Limits::default()).unwrap();
         assert_eq!(image.active_sandbox_mechanism(), SandboxMechanism::Bwrap);
+    }
+
+    #[test]
+    fn loader_errors_blame_the_file() {
+        // Complete JPEG structure (SOI, COM, EOI) but no image in it. The
+        // loader runs in the sandbox and sends back an error.
+        let bad = vec![0xff, 0xd8, 0xff, 0xfe, 0x00, 0x04, b'h', b'i', 0xff, 0xd9];
+        assert!(jpeg_complete(&bad));
+        let err = GlycinDecoder.decode_bytes(bad, &Limits::default());
+        assert!(matches!(err, Err(Error::Decode(_))), "{err:?}");
+    }
+
+    #[test]
+    fn local_glycin_errors_are_sandbox_failures() {
+        let io = glycin::Error::from(std::io::Error::other("spawn failed"));
+        assert!(matches!(load_error(&io, "x"), Error::Sandbox(_)));
+        let other = glycin::Error::other("loader exited early");
+        assert!(matches!(load_error(&other, "x"), Error::Sandbox(_)));
     }
 
     #[test]

@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gtk::glib;
-use safe_upload_core::output::{MAX_AGE, remove_stale};
+use safe_upload_core::output::clean_stale;
 
 pub const INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// Removes stale folders under `$XDG_RUNTIME_DIR/safe-upload`. Returns how
-/// many were removed.
+/// Removes stale folders under `$XDG_RUNTIME_DIR/safe-upload`, after core
+/// checked that folder. Returns how many were removed.
 pub fn remove_stale_now() -> usize {
     match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        Some(dir) if dir.is_absolute() => remove_stale(&dir.join("safe-upload"), MAX_AGE),
+        Some(dir) if dir.is_absolute() => clean_stale(&dir).unwrap_or(0),
         _ => 0,
     }
 }

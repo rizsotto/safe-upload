@@ -17,6 +17,10 @@ pub enum Error {
     UnsafeTempDir,
     #[error("cannot decode the image: {0}")]
     Decode(&'static str),
+    /// The sandboxed decoder could not run, so no file was decoded. Not a
+    /// problem with the image: the system setup is broken (S-4, S-6).
+    #[error("the image decoder could not run in its sandbox: {0}")]
+    Sandbox(&'static str),
     #[error("color conversion failed: {0}")]
     Color(&'static str),
     #[error("invalid edit: {0}")]

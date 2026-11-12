@@ -85,6 +85,32 @@ pub fn neutral_name(position: usize, total: usize, extension: &str) -> String {
     }
 }
 
+/// The output file name: the input's name with the new extension if
+/// `keep_name` is set and the input has a usable name, else the neutral
+/// name ([`neutral_name`]).
+pub fn file_name(
+    input: &Path,
+    keep_name: bool,
+    position: usize,
+    total: usize,
+    extension: &str,
+) -> String {
+    let stem = input.file_stem().and_then(|s| s.to_str());
+    match stem {
+        Some(stem) if keep_name && !stem.is_empty() => format!("{stem}.{extension}"),
+        _ => neutral_name(position, total, extension),
+    }
+}
+
+/// S-2 cleanup: checks `runtime_dir/safe-upload` like [`PrivateDir::create_in`]
+/// does (a real folder owned by the owner of `runtime_dir`, mode 0700,
+/// never a symlink), then deletes stale folders in it. Returns how many
+/// were deleted.
+pub fn clean_stale(runtime_dir: &Path) -> Result<usize, Error> {
+    let base = ensure_base(runtime_dir)?;
+    Ok(remove_stale(&base, MAX_AGE))
+}
+
 /// Deletes folders under `base` whose name is 32 hex digits and that were
 /// last changed more than `max_age` ago. Best effort: errors are ignored.
 /// Returns how many folders were deleted.
@@ -163,6 +189,15 @@ mod tests {
         assert_eq!(neutral_name(1, 1, "jpg"), "image.jpg");
         assert_eq!(neutral_name(1, 3, "jpg"), "image-1.jpg");
         assert_eq!(neutral_name(3, 3, "png"), "image-3.png");
+    }
+
+    #[test]
+    fn file_names() {
+        let p = Path::new("/x/holiday.heic");
+        assert_eq!(file_name(p, false, 1, 1, "jpg"), "image.jpg");
+        assert_eq!(file_name(p, false, 2, 3, "png"), "image-2.png");
+        assert_eq!(file_name(p, true, 2, 3, "jpg"), "holiday.jpg");
+        assert_eq!(file_name(Path::new("/"), true, 1, 1, "jpg"), "image.jpg");
     }
 
     #[test]

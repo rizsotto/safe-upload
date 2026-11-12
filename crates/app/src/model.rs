@@ -15,7 +15,7 @@ use gettextrs::gettext;
 use gtk::gio;
 use gtk::gio::prelude::*;
 use gtk::glib;
-use safe_upload_core::output::{PrivateDir, neutral_name};
+use safe_upload_core::output::{PrivateDir, file_name};
 use safe_upload_core::{Error, Options, Target, prepare};
 
 use crate::item::{ImageItem, Output};
@@ -228,7 +228,7 @@ fn work(path: &Path, options: &Options) -> Result<Output, String> {
 /// values (S-5).
 pub fn row_error(e: &Error) -> String {
     match e {
-        Error::Decode(m) if !m.contains("sandbox") => gettext("Not a supported image"),
+        Error::Decode(_) => gettext("Not a supported image"),
         Error::CannotFit { .. } => format!(
             "{}. {}",
             capitalize(&e.to_string()),
@@ -246,9 +246,9 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// The name the output gets when saved. Mirrors core's naming, but the app
-/// owns it, so adding, removing or renaming needs no new prepare. Before
-/// the format is known, the name has no extension.
+/// The name the output gets when saved. The app names outputs (core's
+/// rules), so adding, removing or renaming needs no new prepare. Before the
+/// format is known, the name has no extension.
 pub fn output_name(
     input: &Path,
     keep: bool,
@@ -256,16 +256,12 @@ pub fn output_name(
     total: usize,
     ext: Option<&str>,
 ) -> String {
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| keep && !s.is_empty());
-    let ext = ext.unwrap_or("");
-    let name = match stem {
-        Some(stem) => format!("{stem}.{ext}"),
-        None => neutral_name(position, total, ext),
-    };
-    name.trim_end_matches('.').to_owned()
+    match ext {
+        Some(ext) => file_name(input, keep, position, total, ext),
+        None => file_name(input, keep, position, total, "")
+            .trim_end_matches('.')
+            .to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -289,8 +285,9 @@ mod tests {
             "Not a supported image"
         );
         assert_eq!(
-            row_error(&Error::Decode("the decoder did not run in the sandbox")),
-            "Cannot decode the image: the decoder did not run in the sandbox"
+            row_error(&Error::Sandbox("the decoder did not run in the sandbox")),
+            "The image decoder could not run in its sandbox: \
+             the decoder did not run in the sandbox"
         );
         assert_eq!(
             row_error(&Error::CannotFit { target_bytes: 1000 }),

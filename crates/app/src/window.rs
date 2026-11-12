@@ -90,17 +90,20 @@ impl Window {
         self.imp().model.get().expect("set in new")
     }
 
-    /// Adds files, as a drop or `Open…` does. Folders and files without a
-    /// local path are skipped with a toast. Everything else goes to core,
-    /// which checks the content.
+    /// Adds files, as a drop or `Open…` does. Only regular files are kept;
+    /// folders, FIFOs, devices and files without a local path are skipped
+    /// with a toast (a FIFO would block the worker forever). Core checks
+    /// the content of the rest.
     pub fn add_files(&self, files: &[gio::File]) {
         let (paths, skipped): (Vec<Option<PathBuf>>, Vec<_>) = files
             .iter()
-            .map(|f| f.path().filter(|p| !p.is_dir()))
+            .map(|f| f.path().filter(|p| p.metadata().is_ok_and(|m| m.is_file())))
             .partition(Option::is_some);
         self.model().add(paths.into_iter().flatten().collect());
         if !skipped.is_empty() {
-            self.toast(&gettext("Folders and non-files were skipped"));
+            self.toast(&gettext(
+                "Only files can be added. Folders and other items were skipped",
+            ));
         }
     }
 
@@ -268,10 +271,7 @@ fn row(item: &ImageItem, model: WeakModel) -> adw::ActionRow {
         .sync_create()
         .build();
 
-    let spinner = gtk::Spinner::new();
-    item.bind_property("busy", &spinner, "spinning")
-        .sync_create()
-        .build();
+    let spinner = adw::Spinner::new();
     item.bind_property("busy", &spinner, "visible")
         .sync_create()
         .build();

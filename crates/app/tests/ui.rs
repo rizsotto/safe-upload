@@ -249,10 +249,18 @@ fn removed_item_result_is_dropped() {
     win.destroy();
 }
 
-fn folders_are_skipped() {
+fn only_regular_files_are_added() {
     let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.jpg");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: plain syscall with a valid C string.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     let win = new_window();
-    win.add_files(&[gio::File::for_path(dir.path())]);
+    win.add_files(&[
+        gio::File::for_path(dir.path()),
+        gio::File::for_path(&fifo),
+        gio::File::for_path(dir.path().join("missing.jpg")),
+    ]);
     assert!(win.model().items().is_empty());
     win.destroy();
 }
@@ -306,15 +314,37 @@ fn default_max_size_shown() {
     win.destroy();
 }
 
+/// Random noise, which compresses badly: `w`x`h` pixels as `name` (the
+/// extension picks the format).
+fn noise(dir: &Path, w: u32, h: u32, name: &str) -> PathBuf {
+    let out = dir.join(name);
+    let status = Command::new("magick")
+        .args([
+            "-size",
+            &format!("{w}x{h}"),
+            "xc:",
+            "+noise",
+            "Random",
+            "-strip",
+        ])
+        .arg(&out)
+        .status()
+        .expect("run magick");
+    assert!(status.success(), "magick failed");
+    out
+}
+
 fn changing_max_size_reprepares() {
-    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let dir = tempfile::tempdir().unwrap();
+    let input = noise(dir.path(), 1600, 1200, "noise.jpg");
     let win = new_window();
-    win.add_files(&files);
+    win.add_files(&[gio::File::for_path(input)]);
     let item = win.model().items()[0].clone();
     let ready = record_ready(&item);
     wait_idle(&win);
     let first = ready.borrow()[0];
     let target = first / 2;
+    assert!(target >= 100_000, "{first}");
     win.settings()
         .set_uint64("max-size", target as u64)
         .unwrap();
@@ -327,10 +357,20 @@ fn changing_max_size_reprepares() {
 }
 
 fn impossible_target_shows_core_message() {
-    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let dir = tempfile::tempdir().unwrap();
+    let noise = noise(dir.path(), 640, 480, "noise.png");
     let win = new_window();
-    win.settings().set_uint64("max-size", 1000).unwrap();
-    win.add_files(&files);
+    // The schema allows 0.1 MB to 100 MB; the row shows the whole range.
+    assert!(win.settings().set_uint64("max-size", 1000).is_err());
+    let row = spin_row(&win, "Max _size (MB)");
+    win.settings().set_uint64("max-size", 100_000).unwrap();
+    assert_eq!(row.value(), 0.1);
+    win.settings().set_uint64("max-size", 100_000_000).unwrap();
+    assert_eq!(row.value(), 100.0);
+    // Random noise cannot be made smaller than 0.1 MB as a PNG.
+    win.settings().set_uint64("max-size", 100_000).unwrap();
+    win.settings().set_string("output-format", "png").unwrap();
+    win.add_files(&[gio::File::for_path(&noise)]);
     wait_idle(&win);
     let item = &win.model().items()[0];
     assert!(item.failed());
@@ -461,7 +501,7 @@ fn main() -> ExitCode {
             "removed_item_result_is_dropped",
             removed_item_result_is_dropped,
         ),
-        ("folders_are_skipped", folders_are_skipped),
+        ("only_regular_files_are_added", only_regular_files_are_added),
         ("default_max_size_shown", default_max_size_shown),
         ("changing_max_size_reprepares", changing_max_size_reprepares),
         (

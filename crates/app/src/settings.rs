@@ -43,7 +43,8 @@ pub fn options(settings: &gio::Settings) -> Options {
     }
 }
 
-/// The settings panel. Every row is bound to its key.
+/// The settings panel. Every row is bound to its key. The max size row
+/// covers the schema's whole range (0.1 to 100 MB).
 pub fn panel(settings: &gio::Settings) -> adw::PreferencesPage {
     let max_size = adw::SpinRow::builder()
         .title(gettext("Max _size (MB)"))
