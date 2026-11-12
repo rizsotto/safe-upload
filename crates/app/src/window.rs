@@ -1,15 +1,16 @@
 //! The main window (SPEC 6.2, M2 plan "Window").
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::path::PathBuf;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gettextrs::gettext;
+use gettextrs::{gettext, ngettext};
 use gtk::{gdk, gio, glib};
 
 use crate::item::ImageItem;
 use crate::model::{Model, WeakModel};
+use crate::save::{self, Named, SaveError};
 use crate::settings;
 
 const IMAGE_TYPES: &[&str] = &[
@@ -29,6 +30,7 @@ mod imp {
         pub model: OnceCell<Model>,
         pub settings: OnceCell<gio::Settings>,
         pub toasts: OnceCell<adw::ToastOverlay>,
+        pub saving: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -203,8 +205,24 @@ impl Window {
         toasts.set_child(Some(&split));
         self.imp().toasts.set(toasts.clone()).expect("once");
 
+        let copy = gtk::Button::builder()
+            .label(gettext("_Copy to Clipboard"))
+            .use_underline(true)
+            .action_name("win.copy")
+            .build();
+        let save = gtk::Button::builder()
+            .label(gettext("_Save to…"))
+            .use_underline(true)
+            .action_name("win.save")
+            .css_classes(["suggested-action"])
+            .build();
+        let bottom = gtk::ActionBar::new();
+        bottom.pack_end(&save);
+        bottom.pack_end(&copy);
+
         let content = adw::ToolbarView::new();
         content.add_top_bar(&header);
+        content.add_bottom_bar(&bottom);
         content.set_content(Some(&toasts));
         self.set_content(Some(&content));
 
@@ -224,10 +242,193 @@ impl Window {
         ));
         self.add_controller(drop);
 
-        let action = gio::ActionEntry::builder("open")
+        let open = gio::ActionEntry::builder("open")
             .activate(|win: &Self, _, _| win.open_dialog())
             .build();
-        self.add_action_entries([action]);
+        let save = gio::ActionEntry::builder("save")
+            .activate(|win: &Self, _, _| win.save_dialog())
+            .build();
+        let copy = gio::ActionEntry::builder("copy")
+            .activate(|win: &Self, _, _| {
+                if let Err(e) = win.copy() {
+                    win.toast(&e.to_string());
+                }
+            })
+            .build();
+        self.add_action_entries([open, save, copy]);
+
+        store.connect_items_changed(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            move |store, pos, _, added| {
+                for i in pos..pos + added {
+                    if let Some(item) = store.item(i).and_downcast::<ImageItem>() {
+                        item.connect_busy_notify(glib::clone!(
+                            #[weak]
+                            win,
+                            move |_| win.update_actions()
+                        ));
+                    }
+                }
+                win.update_actions();
+            }
+        ));
+        self.update_actions();
+    }
+
+    /// Every output with its file name, or `None` if any image is not
+    /// ready (a failed image blocks Save, M2 plan "Window").
+    fn outputs(&self) -> Option<Vec<Named>> {
+        let items = self.model().items();
+        if items.is_empty() {
+            return None;
+        }
+        items
+            .iter()
+            .map(|i| {
+                i.output().map(|o| Named {
+                    name: i.title(),
+                    bytes: o.bytes.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn originals(&self) -> Vec<PathBuf> {
+        self.model()
+            .items()
+            .iter()
+            .map(|i| i.path().to_owned())
+            .collect()
+    }
+
+    fn update_actions(&self) {
+        let items = self.model().items();
+        let ready = items.iter().all(|i| i.output().is_some());
+        let set = |name: &str, enabled: bool| {
+            if let Some(a) = self.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+                a.set_enabled(enabled);
+            }
+        };
+        set(
+            "save",
+            ready && !items.is_empty() && !self.imp().saving.get(),
+        );
+        set("copy", ready && items.len() == 1);
+    }
+
+    /// Puts the single output on the clipboard as its own bytes and MIME
+    /// type, checked again first. Not a texture: GTK would turn that into
+    /// a PNG that is neither the verified file nor within the size.
+    pub fn copy(&self) -> Result<(), SaveError> {
+        let outputs = self.outputs().ok_or(SaveError::NotReady)?;
+        let [out] = outputs.as_slice() else {
+            return Err(SaveError::NotReady);
+        };
+        let mime = save::check(&out.bytes)?;
+        let provider = gdk::ContentProvider::for_bytes(mime, &glib::Bytes::from(&out.bytes));
+        self.clipboard()
+            .set_content(Some(&provider))
+            .map_err(|e| SaveError::Io(std::io::Error::other(e.message.to_string())))?;
+        self.toast(&gettext("Copied. Keep Safe Upload open until you paste."));
+        Ok(())
+    }
+
+    /// One image: a save dialog with the output name. A batch: a folder
+    /// dialog. No initial folder, so it does not open next to the
+    /// originals.
+    fn save_dialog(&self) {
+        let Some(outputs) = self.outputs() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::builder().modal(true).build();
+        if let [one] = outputs.as_slice() {
+            dialog.set_title(&gettext("Save Image"));
+            dialog.set_initial_name(Some(&one.name));
+            dialog.save(
+                Some(self),
+                None::<&gio::Cancellable>,
+                glib::clone!(
+                    #[weak(rename_to = win)]
+                    self,
+                    move |result| {
+                        if let Some(path) = result.ok().and_then(|f| f.path()) {
+                            glib::spawn_future_local(async move {
+                                let _ = win.save_to_file(path).await;
+                            });
+                        }
+                    }
+                ),
+            );
+        } else {
+            dialog.set_title(&gettext("Save Images to Folder"));
+            dialog.select_folder(
+                Some(self),
+                None::<&gio::Cancellable>,
+                glib::clone!(
+                    #[weak(rename_to = win)]
+                    self,
+                    move |result| {
+                        if let Some(path) = result.ok().and_then(|f| f.path()) {
+                            glib::spawn_future_local(async move {
+                                let _ = win.save_to_folder(path).await;
+                            });
+                        }
+                    }
+                ),
+            );
+        }
+    }
+
+    /// Saves the single output to `path` (the file chosen in the dialog).
+    pub async fn save_to_file(&self, path: PathBuf) -> Result<(), SaveError> {
+        let outputs = self.outputs().ok_or(SaveError::NotReady)?;
+        let [out] = outputs.as_slice() else {
+            return Err(SaveError::NotReady);
+        };
+        let bytes = out.bytes.clone();
+        let originals = self.originals();
+        let result = self
+            .run_save(move || save::save_file(&path, &bytes, &originals))
+            .await;
+        if result.is_ok() {
+            self.toast(&gettext("Saved 1 image"));
+        }
+        result
+    }
+
+    /// Saves every output into `folder`, all or nothing.
+    pub async fn save_to_folder(&self, folder: PathBuf) -> Result<usize, SaveError> {
+        let outputs = self.outputs().ok_or(SaveError::NotReady)?;
+        let result = self
+            .run_save(move || save::save_batch(&folder, &outputs))
+            .await;
+        if let Ok(n) = result {
+            let text = ngettext("Saved {} image", "Saved {} images", n as u32);
+            self.toast(&text.replace("{}", &n.to_string()));
+        }
+        result
+    }
+
+    /// Runs a write on a worker thread, so the window stays responsive.
+    /// A failure is shown as a toast.
+    async fn run_save<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, SaveError> + Send + 'static,
+    ) -> Result<T, SaveError> {
+        self.imp().saving.set(true);
+        self.update_actions();
+        let result = gio::spawn_blocking(work).await.unwrap_or_else(|_| {
+            Err(SaveError::Io(std::io::Error::other(gettext(
+                "internal error while saving",
+            ))))
+        });
+        self.imp().saving.set(false);
+        self.update_actions();
+        if let Err(e) = &result {
+            self.toast(&e.to_string());
+        }
+        result
     }
 
     fn open_dialog(&self) {

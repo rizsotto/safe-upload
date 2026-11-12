@@ -4,6 +4,7 @@ pub mod cleanup;
 pub mod config;
 pub mod item;
 pub mod model;
+pub mod save;
 pub mod settings;
 pub mod window;
 
@@ -17,6 +18,8 @@ pub fn application() -> adw::Application {
     app.connect_startup(|app| {
         cleanup::start();
         app.set_accels_for_action("win.open", &["<Control>o"]);
+        app.set_accels_for_action("win.save", &["<Control>s"]);
+        app.set_accels_for_action("win.copy", &["<Control><Shift>c"]);
     });
     app.connect_activate(|app| window::build(app).present());
     app
