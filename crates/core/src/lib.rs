@@ -1,5 +1,13 @@
 //! Image pipeline: decode, orient, redact, strip, fit to size. No GTK, no D-Bus.
 
+mod error;
+mod limits;
+mod options;
+
+pub use error::Error;
+pub use limits::Limits;
+pub use options::{Options, OutputFormat, parse_size};
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
