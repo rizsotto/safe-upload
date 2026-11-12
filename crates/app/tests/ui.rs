@@ -110,7 +110,15 @@ fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
     wake.remove();
 }
 
+const KEYS: &[&str] = &["max-size", "max-long-edge", "output-format", "keep-names"];
+
+/// A window with default settings. The memory backend is shared by the
+/// whole process, so each test starts from the defaults.
 fn new_window() -> Window {
+    let settings = gio::Settings::new(config::APP_ID);
+    for key in KEYS {
+        settings.reset(key);
+    }
     let win = window::build(&app());
     win.present();
     win
@@ -151,7 +159,7 @@ fn add_files_gives_ready_and_error_rows() {
     let out = jpg.output().unwrap();
     assert_eq!(out.extension, "jpg");
     assert!(out.bytes.starts_with(&[0xff, 0xd8]));
-    assert!(out.bytes.len() as u64 <= window::DEFAULT_MAX_SIZE);
+    assert!(out.bytes.len() <= 5_000_000);
 
     let png = &items[1];
     assert!(!png.failed(), "{}", png.status());
@@ -249,6 +257,115 @@ fn folders_are_skipped() {
     win.destroy();
 }
 
+fn find<T: IsA<gtk::Widget>>(root: &gtk::Widget, pred: &dyn Fn(&T) -> bool) -> Option<T> {
+    if let Some(w) = root.downcast_ref::<T>().filter(|w| pred(w)) {
+        return Some(w.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find(&c, pred) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+fn spin_row(win: &Window, title: &str) -> adw::SpinRow {
+    find::<adw::SpinRow>(win.upcast_ref(), &|r| r.title() == title)
+        .unwrap_or_else(|| panic!("no spin row {title}"))
+}
+
+/// Collects the output sizes each time `item` becomes ready.
+fn record_ready(item: &ImageItem) -> Rc<RefCell<Vec<usize>>> {
+    let ready = Rc::new(RefCell::new(Vec::new()));
+    let r = ready.clone();
+    item.connect_busy_notify(move |i| {
+        if let Some(out) = i.output() {
+            r.borrow_mut().push(out.bytes.len());
+        }
+    });
+    ready
+}
+
+fn default_max_size_shown() {
+    let win = new_window();
+    let row = spin_row(&win, "Max _size (MB)");
+    assert_eq!(row.value(), 5.0);
+    assert_eq!(win.model().options().target_bytes, 5_000_000);
+    row.set_value(2.5);
+    assert_eq!(win.settings().uint64("max-size"), 2_500_000);
+    assert_eq!(win.model().options().target_bytes, 2_500_000);
+    win.settings().set_uint64("max-size", 1_200_000).unwrap();
+    assert_eq!(row.value(), 1.2);
+    let edge = spin_row(&win, "Max _long edge (px)");
+    edge.set_value(800.0);
+    assert_eq!(win.model().options().max_long_edge, Some(800));
+    edge.set_value(0.0);
+    assert_eq!(win.model().options().max_long_edge, None);
+    win.destroy();
+}
+
+fn changing_max_size_reprepares() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let win = new_window();
+    win.add_files(&files);
+    let item = win.model().items()[0].clone();
+    let ready = record_ready(&item);
+    wait_idle(&win);
+    let first = ready.borrow()[0];
+    let target = first / 2;
+    win.settings()
+        .set_uint64("max-size", target as u64)
+        .unwrap();
+    assert!(item.busy());
+    wait_idle(&win);
+    let sizes = ready.borrow().clone();
+    assert_eq!(sizes.len(), 2, "{sizes:?}");
+    assert!(sizes[1] <= target, "{sizes:?} target {target}");
+    win.destroy();
+}
+
+fn impossible_target_shows_core_message() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg"]);
+    let win = new_window();
+    win.settings().set_uint64("max-size", 1000).unwrap();
+    win.add_files(&files);
+    wait_idle(&win);
+    let item = &win.model().items()[0];
+    assert!(item.failed());
+    assert!(item.output().is_none());
+    assert!(
+        item.status().contains("cannot be made small enough"),
+        "{}",
+        item.status()
+    );
+    win.destroy();
+}
+
+fn keep_names_and_format_settings() {
+    let (_dir, files) = inputs(&["exif-gps-thumb.jpg", "png-text.png"]);
+    let win = new_window();
+    win.add_files(&files);
+    wait_idle(&win);
+    let items = win.model().items();
+    let out = items[0].output().unwrap();
+    assert_eq!(items[0].title(), "image-1.jpg");
+
+    // Names are the app's job: no new prepare.
+    win.settings().set_boolean("keep-names", true).unwrap();
+    assert!(win.model().is_idle());
+    assert!(Rc::ptr_eq(&out, &items[0].output().unwrap()));
+    assert_eq!(items[0].title(), "exif-gps-thumb.jpg");
+    assert_eq!(items[1].title(), "png-text.jpg");
+
+    win.settings().set_string("output-format", "png").unwrap();
+    wait_idle(&win);
+    assert_eq!(items[1].title(), "png-text.png");
+    assert!(items[1].output().unwrap().bytes.starts_with(b"\x89PNG"));
+    win.destroy();
+}
+
 fn make_stale_folders() {
     let base = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("safe-upload");
     let old = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
@@ -315,6 +432,7 @@ fn children_die_with_their_parent() {
 
 fn main() -> ExitCode {
     let env = headless::Headless::start();
+    env.compile_schemas(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"));
     env.watchdog(WATCHDOG);
 
     make_stale_folders();
@@ -344,6 +462,16 @@ fn main() -> ExitCode {
             removed_item_result_is_dropped,
         ),
         ("folders_are_skipped", folders_are_skipped),
+        ("default_max_size_shown", default_max_size_shown),
+        ("changing_max_size_reprepares", changing_max_size_reprepares),
+        (
+            "impossible_target_shows_core_message",
+            impossible_target_shows_core_message,
+        ),
+        (
+            "keep_names_and_format_settings",
+            keep_names_and_format_settings,
+        ),
         (
             "missing_weston_fails_with_clear_message",
             missing_weston_fails_with_clear_message,

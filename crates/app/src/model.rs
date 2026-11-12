@@ -229,6 +229,11 @@ fn work(path: &Path, options: &Options) -> Result<Output, String> {
 pub fn row_error(e: &Error) -> String {
     match e {
         Error::Decode(m) if !m.contains("sandbox") => gettext("Not a supported image"),
+        Error::CannotFit { .. } => format!(
+            "{}. {}",
+            capitalize(&e.to_string()),
+            gettext("Raise the max size or lower the max long edge.")
+        ),
         e => capitalize(&e.to_string()),
     }
 }
@@ -289,7 +294,8 @@ mod tests {
         );
         assert_eq!(
             row_error(&Error::CannotFit { target_bytes: 1000 }),
-            "The image cannot be made small enough for 1000 bytes"
+            "The image cannot be made small enough for 1000 bytes. \
+             Raise the max size or lower the max long edge."
         );
     }
 }

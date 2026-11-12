@@ -4,6 +4,7 @@ pub mod cleanup;
 pub mod config;
 pub mod item;
 pub mod model;
+pub mod settings;
 pub mod window;
 
 use adw::prelude::*;

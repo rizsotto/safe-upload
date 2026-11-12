@@ -7,13 +7,10 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gettextrs::gettext;
 use gtk::{gdk, gio, glib};
-use safe_upload_core::Options;
 
 use crate::item::ImageItem;
 use crate::model::{Model, WeakModel};
-
-/// SPEC 16.3: 5 MB.
-pub const DEFAULT_MAX_SIZE: u64 = 5_000_000;
+use crate::settings;
 
 const IMAGE_TYPES: &[&str] = &[
     "image/jpeg",
@@ -30,6 +27,7 @@ mod imp {
     #[derive(Default)]
     pub struct Window {
         pub model: OnceCell<Model>,
+        pub settings: OnceCell<gio::Settings>,
         pub toasts: OnceCell<adw::ToastOverlay>,
     }
 
@@ -66,12 +64,26 @@ impl Window {
             .property("default-width", 800)
             .property("default-height", 600)
             .build();
-        let model = Model::new(Options::new(DEFAULT_MAX_SIZE));
+        let settings = settings::load();
+        let model = Model::new(settings::options(&settings));
+        let weak = model.downgrade();
+        settings::on_change(&settings, move |options| {
+            if let Some(model) = weak.upgrade() {
+                model.set_options(options);
+            }
+        });
+        if win.imp().settings.set(settings).is_err() {
+            unreachable!("settings set once");
+        }
         if win.imp().model.set(model).is_err() {
             unreachable!("model set once");
         }
         win.setup();
         win
+    }
+
+    pub fn settings(&self) -> &gio::Settings {
+        self.imp().settings.get().expect("set in new")
     }
 
     pub fn model(&self) -> &Model {
@@ -106,7 +118,7 @@ impl Window {
             .tooltip_text(gettext("Open images"))
             .build();
         let header = adw::HeaderBar::new();
-        header.pack_start(&open);
+        header.pack_end(&open);
 
         let empty_open = gtk::Button::builder()
             .label(gettext("_Open…"))
@@ -165,8 +177,27 @@ impl Window {
         update(&store);
         store.connect_items_changed(move |s, _, _, _| update(s));
 
+        let sidebar = settings::panel(self.settings());
+        let split = adw::OverlaySplitView::builder()
+            .sidebar(&sidebar)
+            .content(&stack)
+            .build();
+        let show_settings = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .active(true)
+            .tooltip_text(gettext("Show settings"))
+            .build();
+        show_settings
+            .update_property(&[gtk::accessible::Property::Label(&gettext("Show settings"))]);
+        show_settings
+            .bind_property("active", &split, "show-sidebar")
+            .bidirectional()
+            .sync_create()
+            .build();
+        header.pack_start(&show_settings);
+
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&stack));
+        toasts.set_child(Some(&split));
         self.imp().toasts.set(toasts.clone()).expect("once");
 
         let content = adw::ToolbarView::new();
