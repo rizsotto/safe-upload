@@ -2310,6 +2310,7 @@ version = "0.0.0"
 dependencies = [
  "futures-lite",
  "getrandom 0.3.4",
+ "glib",
  "glycin",
  "image",
  "imagequant",

@@ -26,6 +26,7 @@ jobs:
             desktop-file-validate data/*.desktop
             appstreamcli validate --no-net data/*.metainfo.xml
             glib-compile-schemas --strict --dry-run data
+            tests/fixtures/test-make.sh
             tests/fixtures/make.sh target/fixtures
             tests/fixtures/check.sh target/fixtures
             cargo fmt --all -- --check

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Builds the M1 test fixtures (SPEC section 13). Nothing here is committed;
-# tests and CI run this script. Needs ImageMagick 7, exiftool and perl.
+# Builds the test fixtures (SPEC section 13). Nothing here is committed;
+# tests and CI run this script. Needs ImageMagick 7, exiftool, perl,
+# avifenc and heif-enc with the x265 encoder (RPM Fusion, decision 0001).
 # Usage: make.sh [OUTDIR]   (default: target/fixtures in the repo)
 set -eu
 
@@ -13,6 +14,10 @@ out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 marker=.safe-upload-fixtures
 if [ -e "$out" ] && [ ! -f "$out/$marker" ]; then
     echo "make.sh: $out exists and is not a fixture folder (no $marker). Refusing to replace it." >&2
+    exit 1
+fi
+if ! heif-enc --list-encoders 2>/dev/null | grep -q '^- x265 '; then
+    echo "make.sh: heif-enc has no x265 encoder, so the HEIC fixtures cannot be made. Install libheif-freeworld and libheif-tools from RPM Fusion (spec/decisions/0001)." >&2
     exit 1
 fi
 tmp=$(mktemp -d "$out.tmp.XXXXXX")
@@ -162,7 +167,25 @@ for f in rgb.avif alpha.avif p3-nclx.avif; do
     [ "$(head -c 12 "$f" | tail -c 8)" = ftypavif ] || { echo "make.sh: $f is not AVIF" >&2; exit 1; }
 done
 
-rm -f thumb-src.jpg makernote.bin png-src.png rgb-src.png p3-src.png
+# 10. Real HEIC (decision 0001). heic-gps: a gradient with GPS, Make and
+#     Model. heic-rot90: red top-left quadrant on blue, stored with an irot
+#     box (rotate 90 CW, shown 480x640) plus EXIF Orientation 6. glycin
+#     applies irot and ignores the EXIF tag for HEIF, so a correct reader
+#     shows 480x640 with red top-right; a double rotation shows it elsewhere.
+mk -size 640x480 gradient:red-blue -depth 8 -strip PNG24:heic-src.png
+heif-enc -e x265 -q 60 -o heic-gps.heic heic-src.png >/dev/null
+mk -size 640x480 xc:blue -fill red -draw "rectangle 0,0 319,239" -depth 8 \
+    -strip PNG24:heic-rot-src.png
+heif-enc -e x265 -q 60 --rotate-cw 90 -o heic-rot90.heic heic-rot-src.png >/dev/null
+for f in heic-gps.heic heic-rot90.heic; do
+    et -Make=FixtureCam -Model=FixtureModel \
+        -GPSLatitude=47.5 -GPSLatitudeRef=N -GPSLongitude=19.04 -GPSLongitudeRef=E \
+        "$f"
+done
+et -n -Orientation=6 heic-rot90.heic
+
+rm -f thumb-src.jpg makernote.bin png-src.png rgb-src.png p3-src.png \
+    heic-src.png heic-rot-src.png
 touch "$marker"
 cd /
 rm -rf "$out"
