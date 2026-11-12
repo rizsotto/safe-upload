@@ -1,0 +1,44 @@
+{
+  "id": "org.example.SafeUpload",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "51",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "safe-upload-app",
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--share=ipc",
+    "--device=dri"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/safe-upload/cargo",
+      "CARGO_NET_OFFLINE": "true"
+    }
+  },
+  "modules": [
+    {
+      "name": "safe-upload",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline build --release --locked -p safe-upload-app -p safe-upload-cli",
+        "install -Dm755 -t /app/bin target/release/safe-upload-app target/release/safe-upload",
+        "install -Dm644 -t /app/share/applications data/org.example.SafeUpload.desktop",
+        "install -Dm644 -t /app/share/metainfo data/org.example.SafeUpload.metainfo.xml",
+        "install -Dm644 -t /app/share/glib-2.0/schemas data/org.example.SafeUpload.gschema.xml",
+        "glib-compile-schemas --strict /app/share/glib-2.0/schemas",
+        "install -Dm644 -t /app/share/icons/hicolor/scalable/apps data/icons/hicolor/scalable/apps/org.example.SafeUpload.svg"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../..",
+          "skip": [".git", ".flatpak-builder", "flatpak_app", "repo", "target"]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}
