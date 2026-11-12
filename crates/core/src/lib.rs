@@ -5,6 +5,7 @@ mod limits;
 mod options;
 pub mod output;
 pub mod sniff;
+pub mod verify;
 
 pub use error::Error;
 pub use limits::Limits;
