@@ -1,7 +1,7 @@
 mod common;
 
 use image::{Rgba, RgbaImage};
-use safe_upload_core::color::to_srgb;
+use safe_upload_core::color::{SourceColor, to_srgb};
 
 #[test]
 fn fixture_p3_profile_converts_to_srgb() {
@@ -13,7 +13,7 @@ fn fixture_p3_profile_converts_to_srgb() {
             [200, 120, 80, 255]
         })
     });
-    let out = to_srgb(input, Some(&icc)).unwrap();
+    let out = to_srgb(input, Some(&SourceColor::Icc(icc))).unwrap();
     for (p, want) in out.pixels().zip([[255, 0, 0], [213, 115, 70]]) {
         for (g, w) in p.0.iter().zip(want) {
             assert!(g.abs_diff(w) <= 2, "got {:?}, want {want:?}", p.0);

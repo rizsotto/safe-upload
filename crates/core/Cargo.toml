@@ -10,9 +10,9 @@ futures-lite = "2"
 getrandom = "0.3"
 glycin = "4"
 image = { version = "0.25", default-features = false }
-lcms2 = "6"
 imagequant = { version = "4", default-features = false }
 miniz_oxide = "0.8"
+moxcms = "0.8.1"
 mozjpeg = "0.10"
 png = "0.18"
 thiserror = "2"

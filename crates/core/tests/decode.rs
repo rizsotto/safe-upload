@@ -3,6 +3,7 @@
 mod common;
 
 use common::fixtures;
+use safe_upload_core::color::SourceColor;
 use safe_upload_core::decode::{Decoder, GlycinDecoder};
 use safe_upload_core::{Error, Format, Limits, Orientation, orient};
 
@@ -30,8 +31,11 @@ fn decodes_every_fixture() {
 #[test]
 fn keeps_the_icc_profile_for_conversion() {
     let want = common::fixture("display-p3.icc");
-    assert_eq!(decode("p3.jpg").unwrap().icc, Some(want));
-    assert_eq!(decode("exif-gps-thumb.jpg").unwrap().icc, None);
+    assert_eq!(
+        decode("p3.jpg").unwrap().color,
+        Some(SourceColor::Icc(want))
+    );
+    assert_eq!(decode("exif-gps-thumb.jpg").unwrap().color, None);
 }
 
 #[test]

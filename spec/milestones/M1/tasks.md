@@ -13,7 +13,7 @@ with no open needs can run in parallel.
 | T18 (done) | `sniff`: detect HEIC/HEIF by content (plan, "HEIC/HEIF is refused in M1"), return `Error::UnsupportedFormat(Format::Heif)` | T03 | Unit `heif_brands_are_refused`: `ftyp` with `heic`, `heix`, `mif1`, `msf1` refused; `avif` passes; JPEG and PNG bytes pass; HEIF header with a `.jpg` name refused; JPEG with a `.heic` name passes; header cut off after `ftyp` refused, no panic |
 | T04 (done) | `output`: private temp dir, 0700/0600, 32-hex name, neutral names, delete dirs older than 1 hour | T03 | Unit with a fake `XDG_RUNTIME_DIR`: modes, name pattern, `image-1.jpg` batch names, old dir removed, new dir kept |
 | T07 (done) | `orient`: apply orientation 1 to 8 | T03 | Unit: 2x3 synthetic image, expected pixel layout for each value |
-| T08 (done) | `color`: ICC to sRGB with lcms2, drop profile | T03 | Unit: P3 red converts to expected sRGB values within tolerance; sRGB input unchanged |
+| T08 (done) | `color`: ICC or CICP to sRGB with moxcms (pure Rust, our own call, not glycin's `color_convert_icc_srgb(true)`), drop the profile | T03 | Unit: P3 red converts to expected sRGB values within tolerance, from an ICC profile and from CICP; sRGB input unchanged; bad profile or CICP is an error |
 | T09 (done) | `encode`: `Encoder` trait, JPEG (mozjpeg), PNG (+imagequant) | T03 | Unit: encode then decode round trip; output has only allowed markers/chunks |
 | T10 (done) | `verify`: JPEG marker and PNG chunk allow list | T03 | Unit: hand-built bytes with APP1 Exif, APP13, XMP, `tEXt`, `eXIf`, second SOI each fail; clean files pass |
 | T12 (done) | `edit`: crop, box, pixelate (SPEC 9.4). No blur yet (SPEC 16.4) | T03 | Unit: box pixels are solid; pixelate block size and noise bounds; crop size |

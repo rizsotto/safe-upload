@@ -14,6 +14,7 @@ use futures_lite::future::block_on;
 use glycin::{Loader, MemoryFormat, MemoryFormatSelection, SandboxMechanism, SandboxSelector};
 use image::RgbaImage;
 
+use crate::color::SourceColor;
 use crate::{Error, Limits, Orientation, sniff};
 
 /// A decoded image, before orientation and color conversion.
@@ -21,9 +22,9 @@ use crate::{Error, Limits, Orientation, sniff};
 pub struct Decoded {
     /// 8 bit RGBA, straight alpha, as stored (not yet oriented).
     pub pixels: RgbaImage,
-    /// The source ICC profile. Only for color conversion; never written
-    /// to the output.
-    pub icc: Option<Vec<u8>>,
+    /// The source color description: the ICC profile if there is one,
+    /// else CICP. Only for color conversion; never written to the output.
+    pub color: Option<SourceColor>,
     pub orientation: Orientation,
 }
 
@@ -72,10 +73,15 @@ impl GlycinDecoder {
             data.extend_from_slice(&line[..row]);
         }
         let pixels = RgbaImage::from_raw(w, h, data).ok_or(Error::Decode("bad frame size"))?;
-        let icc = frame.details().color_icc_profile().map(<[u8]>::to_vec);
+        let details = frame.details();
+        let color = match (details.color_icc_profile(), details.color_cicp()) {
+            (Some(icc), _) => Some(SourceColor::Icc(icc.to_vec())),
+            (None, Some(cicp)) => Some(SourceColor::Cicp(cicp.to_bytes())),
+            (None, None) => None,
+        };
         Ok(Decoded {
             pixels,
-            icc,
+            color,
             orientation,
         })
     }
@@ -229,7 +235,7 @@ mod tests {
             .decode_bytes(jpeg(), &Limits::default())
             .unwrap();
         assert_eq!(d.pixels.dimensions(), (32, 16));
-        assert!(d.icc.is_none());
+        assert!(d.color.is_none());
         assert_eq!(d.orientation, Orientation::Normal);
         let p = d.pixels.get_pixel(5, 5);
         assert!(p[0] > 180 && p[1] < 60 && p[3] == 255, "{p:?}");

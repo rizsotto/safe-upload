@@ -1,90 +1,117 @@
-//! Converts pixels to sRGB and drops the source profile (SPEC 9.1 step 5,
-//! 9.2). The output pixels are always sRGB, so the encoder needs no
-//! profile from the source.
+//! Converts pixels to sRGB and drops the source color description (SPEC
+//! 9.1 step 5, 9.2). The output pixels are always sRGB, so the encoder
+//! needs nothing from the source.
+//!
+//! Uses moxcms, which is pure Rust: the ICC profile comes from an
+//! untrusted file and is parsed in our process (NFR-2). We do not use
+//! glycin's `color_convert_icc_srgb(true)`: it runs the same code in our
+//! process, and on a bad profile it only warns and returns the pixels
+//! unconverted, labelled sRGB.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use image::RgbaImage;
-use lcms2::{ColorSpaceSignature, Flags, Intent, PixelFormat, Profile, Transform};
+use moxcms::{
+    CicpColorPrimaries, CicpProfile, ColorProfile, DataColorSpace, Layout, MatrixCoefficients,
+    TransferCharacteristics, TransformOptions,
+};
 
 use crate::Error;
 
-/// Returns the pixels converted from `icc` to sRGB. Without a profile the
+/// How the source file describes its colors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceColor {
+    /// An embedded ICC profile.
+    Icc(Vec<u8>),
+    /// CICP code points (primaries, transfer, matrix, full range flag), as
+    /// in an AVIF `nclx` box.
+    Cicp([u8; 4]),
+}
+
+/// Returns the pixels converted to sRGB. Without a color description the
 /// pixels are taken to be sRGB already and are returned unchanged. RGB and
-/// gray profiles are supported; any other profile, or one lcms2 cannot
-/// read, is an error.
-pub fn to_srgb(mut image: RgbaImage, icc: Option<&[u8]>) -> Result<RgbaImage, Error> {
-    let Some(icc) = icc else {
+/// gray ICC profiles and CICP with known primaries are supported; anything
+/// else is an error.
+pub fn to_srgb(image: RgbaImage, source: Option<&SourceColor>) -> Result<RgbaImage, Error> {
+    let Some(source) = source else {
         return Ok(image);
     };
-    let source = Profile::new_icc(icc).map_err(|_| Error::Color("cannot read the ICC profile"))?;
-    let srgb = Profile::new_srgb();
-    let failed = |_| Error::Color("cannot convert the ICC profile to sRGB");
-    match source.color_space() {
-        ColorSpaceSignature::RgbData => {
-            let t = Transform::<u8, u8>::new_flags(
-                &source,
-                PixelFormat::RGBA_8,
-                &srgb,
-                PixelFormat::RGBA_8,
-                Intent::Perceptual,
-                Flags::COPY_ALPHA,
-            )
-            .map_err(failed)?;
-            t.transform_in_place(&mut image);
+    catch_unwind(AssertUnwindSafe(|| convert(image, source)))
+        .unwrap_or(Err(Error::Color("the color conversion crashed")))
+}
+
+fn convert(mut image: RgbaImage, source: &SourceColor) -> Result<RgbaImage, Error> {
+    let profile = match source {
+        SourceColor::Icc(icc) => ColorProfile::new_from_slice(icc)
+            .map_err(|_| Error::Color("cannot read the ICC profile"))?,
+        SourceColor::Cicp(cicp) => match cicp_profile(*cicp)? {
+            Some(p) => p,
+            None => return Ok(image),
+        },
+    };
+    let srgb = ColorProfile::new_srgb();
+    let failed = |_| Error::Color("cannot convert the colors to sRGB");
+    let options = TransformOptions::default();
+    match profile.color_space {
+        DataColorSpace::Rgb => {
+            let t = profile
+                .create_transform_8bit(Layout::Rgba, &srgb, Layout::Rgba, options)
+                .map_err(failed)?;
+            let src = image.as_raw().clone();
+            t.transform(&src, &mut image).map_err(failed)?;
         }
-        ColorSpaceSignature::GrayData => {
-            let t = Transform::<u8, [u8; 3]>::new(
-                &source,
-                PixelFormat::GRAY_8,
-                &srgb,
-                PixelFormat::RGB_8,
-                Intent::Perceptual,
-            )
-            .map_err(failed)?;
+        DataColorSpace::Gray => {
+            let t = profile
+                .create_transform_8bit(Layout::Gray, &srgb, Layout::Rgb, options)
+                .map_err(failed)?;
             let gray: Vec<u8> = image.pixels().map(|p| p[0]).collect();
-            let mut rgb = vec![[0u8; 3]; gray.len()];
-            t.transform_pixels(&gray, &mut rgb);
-            for (p, c) in image.pixels_mut().zip(rgb) {
-                p.0[..3].copy_from_slice(&c);
+            let mut rgb = vec![0u8; gray.len() * 3];
+            t.transform(&gray, &mut rgb).map_err(failed)?;
+            for (p, c) in image.pixels_mut().zip(rgb.as_chunks::<3>().0) {
+                p.0[..3].copy_from_slice(c);
             }
         }
-        _ => {
-            return Err(Error::Color(
-                "ICC profiles of this color space are not supported",
-            ));
-        }
+        _ => return Err(Error::Color("this color space is not supported")),
     }
     Ok(image)
+}
+
+/// The profile for CICP code points, or `None` if they mean sRGB.
+/// Unspecified primaries mean sRGB; an unspecified transfer with known
+/// primaries is taken to be the sRGB curve.
+fn cicp_profile([primaries, transfer, _, _]: [u8; 4]) -> Result<Option<ColorProfile>, Error> {
+    const SRGB_PRIMARIES: u8 = 1;
+    const UNSPECIFIED: u8 = 2;
+    const SRGB_TRANSFER: u8 = 13;
+    let transfer = if transfer == UNSPECIFIED {
+        SRGB_TRANSFER
+    } else {
+        transfer
+    };
+    if primaries == UNSPECIFIED || (primaries == SRGB_PRIMARIES && transfer == SRGB_TRANSFER) {
+        return Ok(None);
+    }
+    let unsupported = |_| Error::Color("these CICP values are not supported");
+    let cicp = CicpProfile {
+        color_primaries: CicpColorPrimaries::try_from(primaries).map_err(unsupported)?,
+        transfer_characteristics: TransferCharacteristics::try_from(transfer)
+            .map_err(unsupported)?,
+        // The decoder already gave RGB, so the matrix does not matter.
+        matrix_coefficients: MatrixCoefficients::Identity,
+        full_range: true,
+    };
+    let profile = ColorProfile::new_from_cicp(cicp);
+    // moxcms leaves the curves empty when it cannot use the values.
+    if profile.red_trc.is_none() {
+        return Err(Error::Color("these CICP values are not supported"));
+    }
+    Ok(Some(profile))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Rgba;
-    use lcms2::{CIExyY, CIExyYTRIPLE, ToneCurve};
-
-    fn srgb_curve() -> ToneCurve {
-        ToneCurve::new_parametric(4, &[2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045])
-            .unwrap()
-    }
-
-    fn display_p3() -> Vec<u8> {
-        let d65 = CIExyY {
-            x: 0.3127,
-            y: 0.3290,
-            Y: 1.0,
-        };
-        let p = |x, y| CIExyY { x, y, Y: 1.0 };
-        let primaries = CIExyYTRIPLE {
-            Red: p(0.680, 0.320),
-            Green: p(0.265, 0.690),
-            Blue: p(0.150, 0.060),
-        };
-        let c = srgb_curve();
-        Profile::new_rgb(&d65, &primaries, &[&c, &c, &c])
-            .unwrap()
-            .icc()
-            .unwrap()
-    }
 
     fn image(colors: &[[u8; 4]]) -> RgbaImage {
         RgbaImage::from_fn(colors.len() as u32, 1, |x, _| Rgba(colors[x as usize]))
@@ -98,58 +125,66 @@ mod tests {
         }
     }
 
+    const P3_INPUT: [[u8; 4]; 3] = [[255, 0, 0, 255], [200, 120, 80, 128], [0, 200, 0, 0]];
+    // From the standard P3 (D65) to sRGB matrix.
+    const P3_AS_SRGB: [[u8; 4]; 3] = [[255, 0, 0, 255], [213, 115, 70, 128], [0, 204, 0, 0]];
+
     #[test]
-    fn p3_converts_to_srgb() {
-        // Expected values from the standard P3 (D65) to sRGB matrix.
-        let input = image(&[[255, 0, 0, 255], [200, 120, 80, 128], [0, 200, 0, 0]]);
-        let out = to_srgb(input, Some(&display_p3())).unwrap();
-        assert_near(
-            &out,
-            &[[255, 0, 0, 255], [213, 115, 70, 128], [0, 204, 0, 0]],
-            2,
-        );
+    fn p3_profile_converts_to_srgb() {
+        let icc = ColorProfile::new_display_p3().encode().unwrap();
+        let out = to_srgb(image(&P3_INPUT), Some(&SourceColor::Icc(icc))).unwrap();
+        assert_near(&out, &P3_AS_SRGB, 2);
     }
 
     #[test]
-    fn no_profile_is_unchanged() {
-        let input = image(&[[200, 120, 80, 255], [1, 2, 3, 4]]);
-        assert_eq!(to_srgb(input.clone(), None).unwrap(), input);
+    fn p3_cicp_converts_to_srgb() {
+        // Primaries 12 (Display P3), transfer 13 (sRGB), matrix 6, full range.
+        let out = to_srgb(image(&P3_INPUT), Some(&SourceColor::Cicp([12, 13, 6, 1]))).unwrap();
+        assert_near(&out, &P3_AS_SRGB, 2);
     }
 
     #[test]
-    fn srgb_profile_is_unchanged() {
+    fn srgb_is_unchanged() {
         let colors: Vec<[u8; 4]> = (0..=255).map(|v| [v, 255 - v, v / 2, v]).collect();
         let input = image(&colors);
-        let srgb = Profile::new_srgb().icc().unwrap();
-        assert_near(&to_srgb(input, Some(&srgb)).unwrap(), &colors, 1);
+        assert_eq!(to_srgb(input.clone(), None).unwrap(), input);
+        for cicp in [[1, 13, 6, 1], [2, 2, 2, 0], [1, 2, 0, 1]] {
+            let out = to_srgb(input.clone(), Some(&SourceColor::Cicp(cicp))).unwrap();
+            assert_eq!(out, input, "{cicp:?}");
+        }
+        let icc = ColorProfile::new_srgb().encode().unwrap();
+        let out = to_srgb(input, Some(&SourceColor::Icc(icc))).unwrap();
+        assert_near(&out, &colors, 1);
     }
 
     #[test]
     fn gray_profile_gives_gray_srgb() {
-        let d65 = CIExyY {
-            x: 0.3127,
-            y: 0.3290,
-            Y: 1.0,
-        };
-        let gray = Profile::new_gray(&d65, &srgb_curve())
-            .unwrap()
-            .icc()
-            .unwrap();
+        let gray = ColorProfile::new_gray_with_gamma(2.2).encode().unwrap();
         let input = image(&[[0, 0, 0, 255], [128, 128, 128, 7], [255, 255, 255, 255]]);
-        let out = to_srgb(input, Some(&gray)).unwrap();
-        assert_near(
-            &out,
-            &[[0, 0, 0, 255], [128, 128, 128, 7], [255, 255, 255, 255]],
-            1,
-        );
+        let out = to_srgb(input, Some(&SourceColor::Icc(gray))).unwrap();
+        for (p, a) in out.pixels().zip([255, 7, 255]) {
+            assert!(p[0] == p[1] && p[1] == p[2] && p[3] == a, "{p:?}");
+        }
+        assert_eq!(out.get_pixel(0, 0)[0], 0);
+        assert_eq!(out.get_pixel(2, 0)[0], 255);
     }
 
     #[test]
-    fn garbage_profile_is_an_error() {
-        let input = image(&[[1, 2, 3, 4]]);
+    fn bad_input_is_an_error() {
+        let px = || image(&[[1, 2, 3, 4]]);
+        let bad_icc = SourceColor::Icc(b"not a profile".to_vec());
         assert!(matches!(
-            to_srgb(input, Some(b"not a profile")),
+            to_srgb(px(), Some(&bad_icc)),
             Err(Error::Color(_))
         ));
+        for cicp in [[3, 13, 0, 1], [12, 3, 0, 1], [200, 13, 0, 1]] {
+            assert!(
+                matches!(
+                    to_srgb(px(), Some(&SourceColor::Cicp(cicp))),
+                    Err(Error::Color(_))
+                ),
+                "{cicp:?}"
+            );
+        }
     }
 }
