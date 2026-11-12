@@ -21,13 +21,19 @@ use crate::encode::{Encoder, Pixels};
 pub const MIN_LONG_EDGE: u32 = 640;
 /// The sample takes one tile from each cell of a GRID x GRID grid.
 const GRID: u32 = 8;
-/// Tile edge in output pixels: a multiple of the 16 px JPEG block.
+/// Tile edge in output pixels: a multiple of the 16 px macroblock of
+/// 4:2:0 JPEG, so tile edges fall on block edges.
 const TILE: u32 = 64;
 /// Aim a little below the target, so the prediction error (a few percent
 /// for most photos, decision 0002) rarely pushes the output over it.
 const AIM: f64 = 0.95;
-/// FR-3: the output should be at least this share of the target.
-const GOOD_ENOUGH: f64 = 0.85;
+/// Below this share of the target, one higher quality is tried. FR-3
+/// asks for 85% when possible; 80% saves a full encode for one quality
+/// step in many photos (decision 0002).
+const GOOD_ENOUGH: f64 = 0.8;
+/// The most full encodes at one scale: the guess, one correction, and a
+/// binary search over at most 52 qualities.
+const MAX_ENCODES_PER_SCALE: usize = 8;
 /// Output size grows about with scale^1.7, not with the pixel count,
 /// since a smaller image has more detail per pixel (decision 0002).
 const SCALE_EXPONENT: f64 = 1.7;
@@ -65,58 +71,97 @@ pub fn fit<E: Encoder + ?Sized>(
     let target = target_bytes as f64;
     let overhead = header_bytes(px, q_max, encoder)?;
 
-    // Actual size over predicted size, learned from each full encode.
+    // Actual size over predicted size, learned from the full encodes.
     let mut ratio = 1.0;
-    // The highest quality not yet known to be too big at `scale`. None:
-    // even the lowest is too big.
-    let mut cap = Some(q_max);
     let mut sample = Sample::new(px, scale, overhead);
     loop {
-        let budget = AIM * target / ratio;
-        let guess = match cap {
-            Some(cap) => sample.highest_fitting(q_min, cap, budget, encoder)?,
-            None => None,
-        };
+        let guess = sample.highest_fitting(q_min, q_max, AIM * target / ratio, encoder)?;
         // Below the floor, or when the lowest quality may just fit, the
         // prediction is not trusted to rule it out: try it for real.
-        let try_lowest = guess.is_none()
-            && cap.is_some()
-            && (scale <= floor || sample.predict(q_min, encoder)? * ratio <= target);
         let quality = match guess {
-            Some(q) => q,
-            None if try_lowest => q_min,
-            None if scale <= floor => return Err(Error::CannotFit { target_bytes }),
-            None => {
-                let predicted = sample.predict(q_min, encoder)? * ratio;
-                let step = (AIM * target / predicted).powf(1.0 / SCALE_EXPONENT);
-                scale = (scale * step.min(0.95)).max(floor);
-                sample = Sample::new(px, scale, overhead);
-                cap = Some(q_max);
-                continue;
+            Some(q) => Some(q),
+            None if scale <= floor || sample.predict(q_min, encoder)? * ratio <= target => {
+                Some(q_min)
             }
+            None => None,
         };
-        let first = sample.encode_full(px, quality, encoder)?;
-        let len = first.bytes.len() as f64;
-        ratio = len / sample.predict(quality, encoder)?;
-        if len > target {
-            cap = quality.checked_sub(1).filter(|&q| q >= q_min);
-            continue;
+        if let Some(quality) = quality {
+            match at_scale(px, &mut sample, quality, target, &mut ratio, encoder)? {
+                Some(fitted) => return Ok(fitted),
+                None if scale <= floor => return Err(Error::CannotFit { target_bytes }),
+                None => {}
+            }
         }
-        let top = cap.unwrap_or(q_min);
-        if len >= GOOD_ENOUGH * target || quality >= top {
-            return Ok(first);
+        let predicted = sample.predict(q_min, encoder)? * ratio;
+        let step = (AIM * target / predicted).powf(1.0 / SCALE_EXPONENT);
+        scale = (scale * step.min(0.95)).max(floor);
+        sample = Sample::new(px, scale, overhead);
+    }
+}
+
+/// Encodes the full image at the sample's scale, starting at `quality`.
+/// Returns the best output that fits, or None if even the lowest quality
+/// is too big. At most [`MAX_ENCODES_PER_SCALE`] encodes: the guess, one
+/// correction with the measured ratio (one try up when the guess is under
+/// [`GOOD_ENOUGH`], one try down when it is over), then a binary search
+/// between the best quality that fits and the lowest that does not.
+fn at_scale<E: Encoder + ?Sized>(
+    px: &Pixels,
+    sample: &mut Sample,
+    quality: u8,
+    target: f64,
+    ratio: &mut f64,
+    encoder: &E,
+) -> Result<Option<Fitted>, Error> {
+    let (q_min, q_max) = encoder.quality_range();
+    let q_max = q_max.max(q_min);
+    let fits = |f: &Fitted| f.bytes.len() as f64 <= target;
+    let good = |f: &Fitted| f.bytes.len() as f64 >= GOOD_ENOUGH * target;
+
+    let first = sample.encode_full(px, quality, encoder)?;
+    *ratio = first.bytes.len() as f64 / sample.predict(quality, encoder)?;
+    let budget = AIM * target / *ratio;
+    if fits(&first) {
+        if good(&first) || quality == q_max {
+            return Ok(Some(first));
         }
-        // Too small: one try with a higher quality and the corrected
-        // prediction. Keep the first output if that try does not fit.
-        let budget = AIM * target / ratio;
-        let Some(q) = sample.highest_fitting(quality + 1, top, budget, encoder)? else {
-            return Ok(first);
+        // One try up. Keep the first output if it does not fit.
+        let Some(q) = sample.highest_fitting(quality + 1, q_max, budget, encoder)? else {
+            return Ok(Some(first));
         };
-        let better = sample.encode_full(px, q, encoder)?;
-        if better.bytes.len() as u64 <= target_bytes {
-            return Ok(better);
+        let up = sample.encode_full(px, q, encoder)?;
+        return Ok(Some(if fits(&up) { up } else { first }));
+    }
+    if quality == q_min {
+        return Ok(None);
+    }
+    // One try down with the corrected prediction, then a binary search.
+    let mut best: Option<Fitted> = None;
+    let mut too_big = quality;
+    let mut next = sample
+        .highest_fitting(q_min, quality - 1, budget, encoder)?
+        .unwrap_or(q_min);
+    let mut encodes = 1;
+    loop {
+        let out = sample.encode_full(px, next, encoder)?;
+        encodes += 1;
+        debug_assert!(encodes <= MAX_ENCODES_PER_SCALE);
+        if fits(&out) {
+            let done = good(&out) || too_big - next <= 1;
+            best = Some(out);
+            if done {
+                return Ok(best);
+            }
+        } else {
+            too_big = next;
         }
-        return Ok(first);
+        let below = best
+            .as_ref()
+            .map_or(i32::from(q_min) - 1, |b| i32::from(b.quality));
+        if i32::from(too_big) - below <= 1 {
+            return Ok(best);
+        }
+        next = ((below + i32::from(too_big)) / 2).max(i32::from(q_min)) as u8;
     }
 }
 
@@ -151,7 +196,7 @@ impl Sample {
             if u64::from(w) * u64::from(h) <= u64::from(mosaic * mosaic) || short < GRID * 8 {
                 None
             } else {
-                Some(mosaic_of(px, scale, TILE.min(short / GRID / 8 * 8)))
+                Some(mosaic_of(px, scale, tile_edge(short)))
             };
         let whole = pixels.is_none();
         let pixels = pixels.unwrap_or_else(|| resize(px, scale));
@@ -235,6 +280,16 @@ impl Sample {
             height,
             quality,
         })
+    }
+}
+
+/// [`TILE`], or less for a short edge under GRID * TILE: a multiple of 16
+/// if possible, else of 8.
+fn tile_edge(short: u32) -> u32 {
+    let cell = short / GRID;
+    match cell / 16 * 16 {
+        0 => cell / 8 * 8,
+        t => TILE.min(t),
     }
 }
 
@@ -392,15 +447,98 @@ mod tests {
 
     #[test]
     fn one_correction_when_the_sample_is_too_high() {
-        // The full image is about 12% smaller than predicted, so the first
-        // guess lands under 85% and one higher quality is tried.
-        let fake = Fake::skewed(-0.2);
+        // The full image is about 24% smaller than predicted, so the first
+        // guess lands under 80% and one higher quality is tried.
+        let fake = Fake::skewed(-0.4);
         let target = 4_500_000;
         let f = fit(&px(1000, 800), target, None, &fake).unwrap();
         let len = f.bytes.len() as u64;
         assert!(len <= target);
-        assert!(len as f64 >= 0.85 * target as f64, "{len}");
-        assert!(fake.full_encodes().len() <= 2, "{:?}", fake.full_encodes());
+        assert!(len as f64 >= 0.8 * target as f64, "{len}");
+        let full = fake.full_encodes();
+        assert_eq!(full.len(), 2, "{full:?}");
+        assert!(full[1].2 > full[0].2, "{full:?}");
+        assert_eq!(f.quality, full[1].2);
+    }
+
+    /// The sample is linear in quality, like [`Fake`]; the full image
+    /// costs `bytes_per_pixel(quality)`. So the prediction can be made as
+    /// wrong as a test needs.
+    struct Curve<F> {
+        bytes_per_pixel: F,
+        inner: Fake,
+    }
+
+    impl<F: Fn(u8) -> f64> Curve<F> {
+        fn new(bytes_per_pixel: F) -> Self {
+            Self {
+                bytes_per_pixel,
+                inner: Fake::default(),
+            }
+        }
+    }
+
+    impl<F: Fn(u8) -> f64> Encoder for Curve<F> {
+        fn encode(&self, px: &Pixels, quality: u8) -> Result<Vec<u8>, Error> {
+            let out = self.inner.encode(px, quality)?;
+            let (w, h) = px.image.dimensions();
+            if self.inner.full_encodes().last() != Some(&(w, h, quality)) {
+                return Ok(out);
+            }
+            let len = f64::from(w * h) * (self.bytes_per_pixel)(quality);
+            Ok(vec![0; len as usize])
+        }
+        fn extension(&self) -> &'static str {
+            "fake"
+        }
+    }
+
+    #[test]
+    fn bisects_when_the_correction_is_still_over() {
+        // Everything from quality 45 up is far too big; below, the
+        // prediction is right.
+        let curve = Curve::new(|q| if q >= 45 { 7.0 } else { f64::from(q) / 10.0 });
+        let target = 5_000_000;
+        let f = fit(&px(1000, 800), target, None, &curve).unwrap();
+        assert!(f.bytes.len() as u64 <= target);
+        assert_eq!((f.width, f.quality), (1000, 44));
+        let full = curve.inner.full_encodes();
+        assert!(full.len() <= MAX_ENCODES_PER_SCALE, "{full:?}");
+        assert!(full.len() > 2, "{full:?}");
+    }
+
+    #[test]
+    fn encodes_per_scale_are_bounded() {
+        // Only the lowest quality fits, and the prediction is useless.
+        let curve = Curve::new(|q| if q == 40 { 4.0 } else { 100.0 });
+        let target = 5_000_000;
+        let f = fit(&px(1000, 800), target, None, &curve).unwrap();
+        assert_eq!((f.width, f.quality), (1000, 40));
+        let full = curve.inner.full_encodes();
+        assert!(full.len() <= MAX_ENCODES_PER_SCALE, "{full:?}");
+    }
+
+    #[test]
+    fn keeps_the_first_output_when_the_try_up_does_not_fit() {
+        // 30% smaller than predicted up to quality 60, far too big above.
+        let curve = Curve::new(|q| if q <= 60 { f64::from(q) * 0.07 } else { 10.0 });
+        let target = 5_000_000;
+        let f = fit(&px(1000, 800), target, None, &curve).unwrap();
+        let full = curve.inner.full_encodes();
+        assert_eq!(full.len(), 2, "{full:?}");
+        assert!(full[1].2 > 60, "{full:?}");
+        assert_eq!(f.quality, full[0].2);
+        assert!(f.bytes.len() as u64 <= target);
+    }
+
+    #[test]
+    fn cannot_fit_after_encodes_over_the_target() {
+        // The sample says it fits; every real encode is far too big.
+        let curve = Curve::new(|_| 100.0);
+        let err = fit(&px(1000, 800), 5_000_000, None, &curve).unwrap_err();
+        assert!(matches!(err, Error::CannotFit { .. }));
+        let full = curve.inner.full_encodes();
+        assert_eq!(full.last(), Some(&(640, 512, 40)), "{full:?}");
     }
 
     #[test]

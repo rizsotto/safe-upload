@@ -29,8 +29,10 @@ photo: glycin decode 90 to 560 ms (about 12 ms/MP), sRGB conversion about
 
 20 photos from Wikimedia Commons, all CC0 (license from the Commons API,
 `LicenseShortName`). They were kept in a scratch folder, not in the repo.
-Commons rate-limited full-size downloads, so the last 10 are Commons'
-3840 px wide thumbnails (re-encoded by Commons, still real camera noise).
+Commons rate-limited full-size downloads, so 10 of the 20 (marked
+"thumb") are Commons' 3840 px wide thumbnails, not the originals. Commons
+re-encodes those, which smooths a little of the camera noise, so they may
+be a bit easier to predict than camera files.
 
 | Name | Kind | Size | Source (Commons file page) |
 |---|---|---|---|
@@ -68,7 +70,11 @@ cheap samples encoded at the same settings. Size spread is wide: at quality
 work.
 
 Sample methods, each predicting full size as sample bytes times the pixel
-ratio (one global correction factor fitted per method):
+ratio. To compare methods fairly, the errors below are after one global
+factor fitted per method (the median of actual over predicted). For the
+mosaics that factor is 0.97 to 1.0; the code uses no factor (1.0), and
+the 95% aim and the correction cover the rest. The downscaled samples
+need 0.63 to 0.76, which is part of why they are no good:
 
 | Sample | Sample pixels | Build + one encode | Median error | 90th pct | Worst |
 |---|---|---|---|---|---|
@@ -101,24 +107,29 @@ quality 40, 1.69 at 92; range 0.9 to 2.8), not with the pixel count.
 `fit()` from this branch against the M1 search, on the 20 photos at their
 own size. "Encodes" counts full-image encodes only. Times are for fit
 alone, release build, Ryzen 7 PRO 7840HS, while other jobs loaded the
-machine (load average 18 to 55), so they are noisy.
+machine (load average 13 to 55), so they are noisy. The "new" rows are
+the final code (up-try below 80%). With an 85% bound it was 72 of 80
+with one encode and 8 with two: a few photos spent a full encode to go
+from 82-84% up by one quality step.
 
 | Target | Algorithm | 1 encode | 2 encodes | More | Mean time | Over target | Median size/target |
 |---|---|---|---|---|---|---|---|
-| 5 MB | new | 20 | 0 | 0 | 1.08 s | 0 | 0.45 |
+| 5 MB | new | 20 | 0 | 0 | 1.06 s | 0 | 0.45 |
 | 5 MB | M1 | 0 | 17 | 3 (up to 5) | 1.35 s | 0 | 0.45 |
-| 2 MB | new | 19 | 1 | 0 | 0.96 s | 0 | 0.92 |
+| 2 MB | new | 19 | 1 | 0 | 0.93 s | 0 | 0.92 |
 | 2 MB | M1 | 0 | 6 | 14 (up to 8) | 1.80 s | 0 | 0.95 |
-| 1 MB | new | 18 | 2 | 0 | 0.83 s | 0 | 0.91 |
+| 1 MB | new | 19 | 1 | 0 | 0.75 s | 0 | 0.91 |
 | 1 MB | M1 | 0 | 3 | 17 (up to 8) | 2.11 s | 0 | 0.94 |
-| 500 KB | new | 15 | 5 | 0 | 0.94 s | 0 | 0.92 |
+| 500 KB | new | 16 | 4 | 0 | 0.75 s | 0 | 0.92 |
 | 500 KB | M1 | 0 | 2 | 18 (up to 8) | 2.24 s | 0 | 0.96 |
 
-At 5 MB most photos fit at quality 92 at full size (median 45% of the
-target), so both algorithms give the same file; the old one already needed
-one round there. Every output under 85% of the target is quality 92 at full
-size, where nothing better is allowed. The new outputs are a little smaller
-(median 0.92 against 0.95) because they aim at 95% and stop.
+At 5 MB the median output is about 45% of the target at quality 92, full
+size: nearly every photo already fits at Q_MAX, so the 5 MB row mostly
+tests that path, not the prediction. Both algorithms give the same file
+there; the old one already needed one round. Every new output under 80%
+of the target is quality 92 at full size, where nothing better is
+allowed. The new outputs are a little smaller (median 0.92 against 0.95)
+because they aim at 95% and stop.
 
 Same photos scaled to 12 MP, fit only, median of 3 runs on 6 photos:
 5 MB 0.77 s (0.5 to 2.6 s), 2 MB 1.29 s (0.6 to 1.4 s); M1 search 0.84 s
@@ -140,8 +151,10 @@ the fastest run is the fairest number; all runs are in the scratch data.
 | landscape-gorge, 24 MP | 2 MB | 2.32 s (2.32 to 3.35) | 6.23 s (6.23 to 7.85) |
 
 The CLI time includes the sandboxed decode, the input scan, writing and
-verifying the output. These numbers should be measured again on an idle
-machine before NFR-1 is called met.
+verifying the output. These runs are from before the review fixes (85%
+up-try bound); for these two photos both versions do one full encode. The
+machine never went idle (load average 13 or more), so the table still
+needs a run on an idle machine before NFR-1 is called met.
 
 ## Options
 
@@ -158,11 +171,15 @@ header bytes plus mosaic bytes times the pixel ratio. Aim at 95% of the
 target. If even quality 40 is predicted too big, shrink the scale by the
 1.7 power law and sample again. Encode the full image once. If it is over
 the target, divide the prediction by the measured ratio and pick a lower
-quality (or scale). If it is under 85%, try one higher quality the same
-way and keep whichever fits. Small images (at most 512x512 after scaling)
+quality; if that is still over, binary-search between the best quality
+that fits and the lowest that does not, or scale down if even quality 40
+is too big. If the first output is under 80%, try one higher quality the
+same way and keep whichever fits. Small images (at most 512x512 after scaling)
 are their own sample, so their sample encode is the output.
-Pros: one full encode in 72 of 80 cases, two in the rest, never more.
-Never over target. Simple: one loop, no parallel threads. Works for PNG
+Pros: one full encode in 74 of 80 cases and two in 6 of 80, measured
+(see the table). The worst case is bounded by design at 8 full encodes per
+scale: the guess, one correction, and a binary search over at most 52
+qualities. Never over target. Simple: one loop, no parallel threads. Works for PNG
 too (the correction handles PNG's flatter size curve).
 Cons: the sample work is sequential (about 2 to 12 small encodes). The
 prediction error is larger for big flat areas and grid-like documents, which
@@ -182,9 +199,15 @@ percent. It would need correction encodes most of the time.
 
 B. The data clearly supports it: the tile mosaic predicts the full size
 within a few percent for most photos, at about 1/40 of the cost of a full
-encode, and the end-to-end test needs one full encode in 90% of cases and
-never more than two. The hard rule holds: the loop only returns an encode
-that it measured to be within the target. SPEC 9.3 is updated to match.
+encode. Measured: 1 full encode in 74 of 80 runs, 2 in 6 of 80. Worst
+case, bounded by design: 8 full encodes per scale. The hard rule holds:
+the loop only returns an encode that it measured to be within the target,
+and it reports "cannot fit" only after quality 40 at the floor was encoded
+and was too big. SPEC 9.3 is updated to match.
+
+The up-try bound is 80%, not FR-3's 85%, so a result of 80-85% is kept
+instead of spending another full encode on one quality step. FR-3 says
+"should", so this fits it, but the human should confirm the trade.
 
 NFR-1 is close but not always met: the 12 MP photo took 1.5 s at best
 for both 5 MB and 2 MB on a busy machine. With one encode left, the time is

@@ -256,28 +256,34 @@ scale = min(1.0, max_long_edge / long_edge)
 floor = min(scale, MIN_LONG_EDGE (640) / long_edge)
 overhead = len(encode(8x8 corner, Q_MAX))      # headers and profile, not per pixel
 ratio = 1.0                                     # actual / predicted, learned from full encodes
-cap = Q_MAX                                     # none: even Q_MIN is too big at this scale
 loop:
-    sample = 8x8 grid of tiles, 64 px each (less if the short edge is under 512),
-             one from the middle of each grid cell, at the output scale (Lanczos3);
-             the whole scaled image if it has at most 512x512 pixels
+    sample = 8x8 grid of tiles, 64 px each (less if the short edge is under 512,
+             a multiple of 16 when possible), one from the middle of each grid cell,
+             at the output scale (Lanczos3); the whole scaled image if it has at
+             most 512x512 pixels
     predict(q) = overhead + (len(encode(sample, q)) - overhead) * pixels(image) / pixels(sample)
-    q = highest quality in [Q_MIN, cap] with predict(q) * ratio <= 0.95 * target   # binary search on the sample
-    if no q:
-        if cap and (scale <= floor or predict(Q_MIN) * ratio <= target): q = Q_MIN   # try it for real
-        elif scale <= floor: error "cannot fit"
-        else:
-            scale = max(floor, scale * min(0.95, (0.95 * target / (predict(Q_MIN) * ratio)) ^ (1 / 1.7)))
-            cap = Q_MAX; continue
+    q = highest quality with predict(q) * ratio <= 0.95 * target   # binary search on the sample
+    if no q and (scale <= floor or predict(Q_MIN) * ratio <= target): q = Q_MIN   # try it for real
+    if q:
+        out = at_scale(q)
+        if out: return out
+        if scale <= floor: error "cannot fit"          # Q_MIN at the floor was encoded and is too big
+    scale = max(floor, scale * min(0.95, (0.95 * target / (predict(Q_MIN) * ratio)) ^ (1 / 1.7)))
+
+at_scale(q):                                    # at most 8 full encodes
     out = encode(resize(pixels, scale), q)
     ratio = len(out) / predict(q)
-    if len(out) > target:
-        cap = q - 1, or none if q == Q_MIN; continue
-    if len(out) >= 0.85 * target or q == cap: return out
-    q2 = highest quality in (q, cap] with predict(q2) * ratio <= 0.95 * target   # one try up
-    return encode(q2) if it fits, else out
+    if len(out) <= target:
+        if len(out) >= 0.8 * target or q == Q_MAX: return out
+        q2 = highest quality above q with predict(q2) * ratio <= 0.95 * target   # one try up
+        return encode(q2) if it fits, else out
+    if q == Q_MIN: return none
+    q2 = highest quality below q with predict(q2) * ratio <= 0.95 * target, else Q_MIN   # one try down
+    then binary search between the best quality that fits (or Q_MIN - 1) and the
+    lowest that does not, stopping at the first output >= 0.8 * target
+    return the best output that fits, or none
 ```
-The search never returns a file above the target. Most photos need one full encode, a few need two (decision 0002 has the data).
+The search never returns a file above the target. It stops at 80% of the target or more (FR-3 asks for 85% when possible; decision 0002 trades that for fewer encodes). Most photos need one full encode, a few need two; at one scale it never needs more than 8 (decision 0002 has the data).
 - PNG input with transparency → output PNG. Fit by quantizing (`imagequant`) and then scaling. If that fails, tell the user, or offer WebP if they allow it.
 - PNG input without transparency → JPEG by default (much smaller for photos).
 - Cache encodes so the UI preview does not encode twice.

@@ -46,10 +46,10 @@ proptest! {
             Ok(f) => {
                 let len = f.bytes.len() as u64;
                 prop_assert!(len <= target);
-                // FR-3: at least 85% when the best quality at full size
-                // does not fit anyway.
+                // FR-3, with the 80% bound of decision 0002: when the best
+                // quality at full size does not fit anyway.
                 if f.quality < 92 || f.width < WIDTH {
-                    prop_assert!(len * 100 >= target * 85, "{} for {}", len, target);
+                    prop_assert!(len * 100 >= target * 80, "{} for {}", len, target);
                 }
                 verify(&f.bytes, None).unwrap();
             }
@@ -86,7 +86,7 @@ fn typical_targets_need_one_full_encode() {
         let counting = Counting::default();
         let f = fit(photo(), target, None, &counting).unwrap();
         assert!(f.bytes.len() as u64 <= target);
-        assert!(f.bytes.len() as u64 * 100 >= target * 85);
+        assert!(f.bytes.len() as u64 * 100 >= target * 80);
         assert_eq!(f.width, WIDTH);
         let full = counting.full.lock().unwrap();
         assert!(full.len() <= 2, "{target}: {full:?}");
@@ -106,7 +106,11 @@ fn png_with_alpha_fits_or_errors() {
     let lossless = PngEncoder.encode(&px, 100).unwrap().len() as u64;
     for target in [lossless / 2, lossless / 3] {
         let f = fit(&px, target, None, &PngEncoder).unwrap();
-        assert!(f.bytes.len() as u64 <= target, "{target}");
+        let len = f.bytes.len() as u64;
+        assert!(len <= target, "{target}");
+        assert!(len * 100 >= target * 80, "{len} for {target}");
+        // Quantizing alone is not enough for this noisy image.
+        assert!(f.width < 800, "{target}");
         verify(&f.bytes, None).unwrap();
     }
     assert!(matches!(
