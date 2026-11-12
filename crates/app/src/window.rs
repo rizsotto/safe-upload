@@ -8,6 +8,7 @@ use adw::subclass::prelude::*;
 use gettextrs::gettext;
 use gtk::{gdk, gio, glib};
 
+use crate::edit_dialog;
 use crate::item::ImageItem;
 use crate::model::{Model, WeakModel};
 use crate::settings;
@@ -146,9 +147,10 @@ impl Window {
             .build();
         list.update_property(&[gtk::accessible::Property::Label(&gettext("Images"))]);
         let weak_model = self.model().downgrade();
+        let weak_win = self.downgrade();
         list.bind_model(Some(self.model().store()), move |obj| {
             let item = obj.downcast_ref::<ImageItem>().expect("ImageItem");
-            row(item, weak_model.clone()).upcast()
+            row(item, weak_model.clone(), weak_win.clone()).upcast()
         });
         let clamp = adw::Clamp::builder()
             .child(&list)
@@ -230,6 +232,12 @@ impl Window {
         self.add_action_entries([action]);
     }
 
+    /// Opens the redaction editor for `item` once its preview is loaded.
+    /// Focus goes to `return_focus` when the editor closes.
+    pub fn open_editor(&self, item: &ImageItem, return_focus: Option<&gtk::Widget>) {
+        edit_dialog::open(self, item, return_focus.cloned());
+    }
+
     fn open_dialog(&self) {
         let filter = gtk::FileFilter::new();
         filter.set_name(Some(&gettext("Images")));
@@ -261,7 +269,7 @@ impl Window {
     }
 }
 
-fn row(item: &ImageItem, model: WeakModel) -> adw::ActionRow {
+fn row(item: &ImageItem, model: WeakModel, win: glib::WeakRef<Window>) -> adw::ActionRow {
     let row = adw::ActionRow::new();
     row.set_title_lines(1);
     item.bind_property("title", &row, "title")
@@ -272,9 +280,14 @@ fn row(item: &ImageItem, model: WeakModel) -> adw::ActionRow {
         .build();
 
     let spinner = adw::Spinner::new();
-    item.bind_property("busy", &spinner, "visible")
-        .sync_create()
-        .build();
+    let show_spinner = glib::clone!(
+        #[weak]
+        spinner,
+        move |i: &ImageItem| spinner.set_visible(i.busy() || i.loading())
+    );
+    show_spinner(item);
+    item.connect_busy_notify(show_spinner.clone());
+    item.connect_loading_notify(show_spinner);
     row.add_prefix(&spinner);
 
     let error = gtk::Image::from_icon_name("dialog-error-symbolic");
@@ -284,6 +297,24 @@ fn row(item: &ImageItem, model: WeakModel) -> adw::ActionRow {
         .sync_create()
         .build();
     row.add_prefix(&error);
+
+    let edit = gtk::Button::builder()
+        .icon_name("document-edit-symbolic")
+        .tooltip_text(gettext("Edit"))
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    edit.update_property(&[gtk::accessible::Property::Label(&gettext("Edit"))]);
+    edit.connect_clicked(glib::clone!(
+        #[weak]
+        item,
+        move |b| {
+            if let Some(win) = win.upgrade() {
+                win.open_editor(&item, Some(b.upcast_ref()));
+            }
+        }
+    ));
+    row.add_suffix(&edit);
 
     let remove = gtk::Button::builder()
         .icon_name("user-trash-symbolic")

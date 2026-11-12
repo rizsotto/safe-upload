@@ -2288,9 +2288,11 @@ version = "0.0.0"
 dependencies = [
  "gettext-rs",
  "gtk4",
+ "image",
  "libadwaita",
  "libc",
  "safe-upload-core",
+ "safe-upload-editor-widget",
  "tempfile",
 ]
 

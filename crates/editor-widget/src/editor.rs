@@ -638,6 +638,12 @@ impl RedactionEditor {
         }
     }
 
+    /// A mouse press or a held arrow key is in progress. A dialog holding
+    /// the editor should not close then.
+    pub fn in_gesture(&self) -> bool {
+        self.imp().key_held.get() || self.imp().drag.get().is_some()
+    }
+
     /// The canvas's accessible description, kept up to date.
     pub fn description(&self) -> String {
         self.imp().description.borrow().clone()
