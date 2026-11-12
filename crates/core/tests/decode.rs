@@ -3,7 +3,7 @@
 mod common;
 
 use common::fixtures;
-use safe_upload_core::color::SourceColor;
+use safe_upload_core::color::{self, SourceColor};
 use safe_upload_core::decode::{Decoder, GlycinDecoder};
 use safe_upload_core::{Error, Format, Limits, Orientation, orient};
 
@@ -26,6 +26,35 @@ fn decodes_every_fixture() {
     let alpha = decode("alpha.png").unwrap();
     assert_eq!(alpha.pixels.get_pixel(0, 0)[3], 0);
     assert_eq!(alpha.pixels.get_pixel(32, 32)[3], 255);
+}
+
+#[test]
+fn decodes_real_webp_and_avif_in_the_sandbox() {
+    for (name, size, alpha) in [
+        ("rgb.webp", (64, 48), false),
+        ("alpha.webp", (64, 64), true),
+        ("rgb.avif", (64, 48), false),
+        ("alpha.avif", (64, 64), true),
+    ] {
+        let d = decode(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(d.pixels.dimensions(), size, "{name}");
+        // Lossy AVIF alpha is not exactly 0.
+        let corner = d.pixels.get_pixel(0, 0)[3];
+        assert_eq!(corner < 8, alpha, "{name}: corner alpha {corner}");
+        assert_eq!(d.pixels.get_pixel(32, 32)[3], 255, "{name}");
+    }
+}
+
+#[test]
+fn avif_with_cicp_only_converts_to_srgb() {
+    let d = decode("p3-nclx.avif").unwrap();
+    assert_eq!(d.color, Some(SourceColor::Cicp([12, 13, 0, 1])));
+    let out = color::to_srgb(d.pixels, d.color.as_ref()).unwrap();
+    // P3 rgb(200,120,80) is sRGB rgb(213,115,70).
+    let p = out.get_pixel(48, 16);
+    for (got, want) in p.0.iter().zip([213u8, 115, 70]) {
+        assert!(got.abs_diff(want) <= 2, "got {p:?}");
+    }
 }
 
 #[test]
@@ -62,7 +91,10 @@ fn orientations_come_out_upright() {
 
 #[test]
 fn huge_image_is_refused_before_decoding() {
-    let err = decode("huge-dims.jpg").unwrap_err();
+    // No unwrap_err: printing a decoded 400 MP image takes minutes.
+    let Err(err) = decode("huge-dims.jpg") else {
+        panic!("huge-dims.jpg decoded");
+    };
     assert!(
         matches!(
             err,

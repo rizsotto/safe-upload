@@ -58,7 +58,11 @@ impl GlycinDecoder {
 
         let frame = block_on(image.next_frame()).map_err(|_| Error::Decode("decoding failed"))?;
         let (w, h) = (frame.width(), frame.height());
-        limits.check_dimensions(w, h)?;
+        // The pixel count was checked from the header, before the frame
+        // was allocated.
+        if (w, h) != (details.width(), details.height()) {
+            return Err(Error::Decode("frame size differs from header"));
+        }
         if frame.memory_format() != MemoryFormat::R8g8b8a8 {
             return Err(Error::Decode("unexpected pixel format"));
         }
@@ -114,8 +118,7 @@ fn check_complete(b: &[u8]) -> Result<(), Error> {
     } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
         let size = u32::from_le_bytes(b[4..8].try_into().unwrap());
         b.len() as u64 >= 8 + u64::from(size)
-    } else if b.get(4..8) == Some(b"ftyp") {
-        // HEIF was refused by sniff, so this is AVIF.
+    } else if is_avif(b) {
         isobmff_complete(b)
     } else {
         return Err(Error::Decode("unknown or unsupported image format"));
@@ -187,6 +190,26 @@ fn png_complete(b: &[u8]) -> bool {
         i = end;
     }
     false
+}
+
+/// An `ftyp` box with an `avif` or `avis` brand. Other HEIF brands were
+/// refused by `sniff`.
+fn is_avif(b: &[u8]) -> bool {
+    if b.get(4..8) != Some(b"ftyp") {
+        return false;
+    }
+    let size = u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize;
+    let Some(ftyp) = b.get(8..size.min(b.len())) else {
+        return false;
+    };
+    // Major brand, minor version, then compatible brands.
+    let brands = ftyp
+        .get(..4)
+        .into_iter()
+        .chain(ftyp.get(8..).unwrap_or(&[]).chunks(4));
+    brands
+        .into_iter()
+        .any(|brand| brand == b"avif" || brand == b"avis")
 }
 
 /// Every top-level box must fit in the file.
@@ -279,6 +302,16 @@ mod tests {
         assert!(check_complete(&avif).is_err());
         avif.extend_from_slice(&[0; 8]);
         assert!(check_complete(&avif).is_ok());
+    }
+
+    #[test]
+    fn only_avif_brands_count_as_avif() {
+        let mut mp4 = b"\0\0\0\x14ftypmp42\0\0\0\0isom".to_vec();
+        mp4.extend_from_slice(b"\0\0\0\x08free");
+        assert!(matches!(check_complete(&mp4), Err(Error::Decode(_))));
+        let mut avis = b"\0\0\0\x14ftypmif1\0\0\0\0avis".to_vec();
+        avis.extend_from_slice(b"\0\0\0\x08free");
+        assert!(check_complete(&avis).is_ok());
     }
 
     #[test]

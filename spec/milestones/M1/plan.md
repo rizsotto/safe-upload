@@ -94,7 +94,8 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
   check runs before glycin sees the file, so the result is the same on hosts
   that have an HEVC decoder. Error: `Error::UnsupportedFormat(Format::Heif)`.
 - **Decode input formats.** `decode` accepts only JPEG, PNG, WebP and
-  AVIF (SPEC 4), detected by content. Anything else (GIF, SVG, TIFF...)
+  AVIF (SPEC 4), detected by content (AVIF needs an `avif` or `avis`
+  brand in `ftyp`). Anything else (GIF, SVG, TIFF...)
   gives `Error::Decode` before glycin sees it. Each accepted format has a
   cut-off check: JPEG markers up to EOI, PNG chunks up to IEND, the RIFF
   size for WebP, top-level box sizes for AVIF.
@@ -150,6 +151,8 @@ GPL-3.0-or-later.
     height against `Limits` after `load()` and before `next_frame()`.
     glycin's own `Limits` are per side (default 65535 x 65535) with a 60 s
     timeout.
+    After `next_frame()` the core only checks that the frame size equals
+    the header size, so a test proves the early check.
 
 No other section 15 item is needed for M1. They are all portal or GTK facts.
 

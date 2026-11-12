@@ -14,7 +14,9 @@ RUN dnf -y install glycin-loaders bubblewrap glib2-devel fontconfig-devel \
 RUN dnf -y install nasm && dnf clean all
 
 # Test fixtures (tests/fixtures/make.sh).
-RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress && dnf clean all
+# avifenc makes real AVIF files; ImageMagick on Fedora cannot.
+RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress libavif-tools \
+        && dnf clean all
 
 ARG USERNAME=dev
 ARG USER_UID=1000
