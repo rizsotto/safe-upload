@@ -92,8 +92,8 @@ impl ImageItem {
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_edits(&self, edits: EditModel) {
-        self.imp().edits.replace(Some(edits));
+    pub(crate) fn set_edits(&self, edits: Option<EditModel>) {
+        self.imp().edits.replace(edits);
     }
 
     pub(crate) fn set_loading(&self, loading: bool) {

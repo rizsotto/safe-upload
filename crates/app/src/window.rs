@@ -514,11 +514,11 @@ fn row(item: &ImageItem, model: WeakModel, win: glib::WeakRef<Window>) -> adw::A
 
     let edit = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
-        .tooltip_text(gettext("Edit"))
+        .tooltip_text(gettext("Edit image"))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
-    edit.update_property(&[gtk::accessible::Property::Label(&gettext("Edit"))]);
+    edit.update_property(&[gtk::accessible::Property::Label(&gettext("Edit image"))]);
     edit.connect_clicked(glib::clone!(
         #[weak]
         item,
@@ -532,11 +532,11 @@ fn row(item: &ImageItem, model: WeakModel, win: glib::WeakRef<Window>) -> adw::A
 
     let remove = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
-        .tooltip_text(gettext("Remove"))
+        .tooltip_text(gettext("Remove image"))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
-    remove.update_property(&[gtk::accessible::Property::Label(&gettext("Remove"))]);
+    remove.update_property(&[gtk::accessible::Property::Label(&gettext("Remove image"))]);
     remove.connect_clicked(glib::clone!(
         #[weak]
         item,

@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use image::RgbaImage;
 use safe_upload_app::item::ImageItem;
 use safe_upload_app::save::SaveError;
@@ -25,7 +25,7 @@ use safe_upload_app::window::Window;
 use safe_upload_app::{config, window};
 use safe_upload_core::edit::{self, Rect};
 use safe_upload_core::{Limits, Options, pipeline};
-use safe_upload_editor_widget::{RedactionEditor, Tool, preview};
+use safe_upload_editor_widget::{AreaKind, EditModel, RedactionEditor, Tool, preview};
 
 const WATCHDOG: Duration = Duration::from_secs(300);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -658,7 +658,7 @@ fn focus(win: &Window) -> gtk::Widget {
 
 fn edit_button(win: &Window) -> gtk::Button {
     find::<gtk::Button>(win.upcast_ref(), &|b| {
-        b.tooltip_text().as_deref() == Some("Edit")
+        b.tooltip_text().as_deref() == Some("Edit image")
     })
     .expect("edit button")
 }
@@ -673,7 +673,9 @@ fn open_editor(win: &Window) -> (adw::Dialog, RedactionEditor) {
     let dialog = win.visible_dialog().unwrap();
     let ed = find::<RedactionEditor>(dialog.upcast_ref(), &|_| true).expect("editor");
     let canvas = ed.canvas();
-    wait_until("editor layout", PREPARE_TIMEOUT, || canvas.width() > 0);
+    wait_until("editor shown", PREPARE_TIMEOUT, || {
+        canvas.is_mapped() && canvas.width() > 0
+    });
     (dialog, ed)
 }
 
@@ -687,15 +689,65 @@ fn drag(ed: &RedactionEditor, a: (f64, f64), b: (f64, f64)) {
 
 fn finish(win: &Window, dialog: &adw::Dialog, action: &str) {
     dialog.activate_action(action, None).unwrap();
+    wait_closed(win);
+    wait_idle(win);
+}
+
+fn wait_closed(win: &Window) {
     let w = win.clone();
     wait_until("dialog to close", PREPARE_TIMEOUT, || {
         w.visible_dialog().is_none()
     });
-    wait_idle(win);
+}
+
+/// Runs the dialog's own Escape shortcut, as a key press that the canvas
+/// does not use. (Headless tests cannot send real key events.)
+fn press_dialog_escape(dialog: &adw::Dialog) {
+    let escape = gtk::ShortcutTrigger::parse_string("Escape").unwrap();
+    fn walk(
+        w: &gtk::Widget,
+        escape: &gtk::ShortcutTrigger,
+        out: &mut Vec<(gtk::Widget, gtk::Shortcut)>,
+    ) {
+        for c in w.observe_controllers().iter::<glib::Object>().flatten() {
+            let Ok(c) = c.downcast::<gtk::ShortcutController>() else {
+                continue;
+            };
+            for s in c.iter::<glib::Object>().flatten() {
+                let s = s.downcast::<gtk::Shortcut>().unwrap();
+                if s.trigger().is_some_and(|t| t.equal(escape)) {
+                    out.push((w.clone(), s));
+                }
+            }
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            walk(&c, escape, out);
+            child = c.next_sibling();
+        }
+    }
+    let mut found = Vec::new();
+    walk(dialog.upcast_ref(), &escape, &mut found);
+    let [(w, s)] = found.as_slice() else {
+        panic!(
+            "want one Escape shortcut in the dialog, found {}",
+            found.len()
+        );
+    };
+    let action = s.action().unwrap();
+    action.activate(
+        gtk::ShortcutActionFlags::EXCLUSIVE,
+        w,
+        s.arguments().as_ref(),
+    );
 }
 
 fn near_black(p: &image::Rgba<u8>) -> bool {
     p.0[..3].iter().all(|&c| c < 40)
+}
+
+fn red(p: &image::Rgba<u8>) -> bool {
+    p.0[0] > 150 && p.0[1] < 100
 }
 
 fn editor_box_is_solid_where_drawn_on_rotated_input() {
@@ -714,42 +766,65 @@ fn editor_box_is_solid_where_drawn_on_rotated_input() {
     wait_until("canvas focus", Duration::from_secs(5), || {
         GtkWindowExt::focus(&w).is_some_and(|f| f == canvas)
     });
+    ed.set_tool(Tool::Crop);
+    drag(&ed, (0.0, 0.0), (88.0, 60.0));
+    let c = ed.model().unwrap().crop().expect("crop");
+    assert!(
+        c.x <= 1 && c.y <= 1 && c.width >= 86 && c.height >= 58,
+        "{c:?}"
+    );
+    ed.set_tool(Tool::Box);
+    // A box over the full width, from edge to edge.
+    drag(&ed, (-4.0, 38.0), (100.0, 52.0));
     drag(&ed, (2.0, 2.0), (30.0, 20.0));
-    assert_eq!(ed.to_options().1.len(), 1);
+    assert_eq!(ed.to_options().1.len(), 2);
     // Nothing changes until Done.
     assert!(Rc::ptr_eq(&first, &item.output().unwrap()));
-    finish(&win, &dialog, "dialog.done");
+    dialog.activate_action("dialog.done", None).unwrap();
+    // The old output is gone at once: nothing stale can be saved or copied.
+    assert!(item.output().is_none() && item.busy());
+    assert!(!action_enabled(&win, "save"));
+    assert!(!action_enabled(&win, "copy"));
+    wait_closed(&win);
+    wait_idle(&win);
     assert_eq!(focus(&win), edit_button(&win).upcast::<gtk::Widget>());
 
     assert!(!item.failed(), "{}", item.status());
     let out = item.output().unwrap();
     let img = decode(&out.bytes, &out.extension);
-    assert_eq!(img.dimensions(), (96, 64));
-    for (x, y) in [(6, 6), (16, 10), (26, 16)] {
-        assert!(
-            near_black(img.get_pixel(x, y)),
-            "({x}, {y}) {:?}",
-            img.get_pixel(x, y)
-        );
+    assert_eq!(img.dimensions(), (c.width, c.height));
+    // Output pixel of the upright full-size pixel (x, y).
+    let px = |x: u32, y: u32| *img.get_pixel(x - c.x, y - c.y);
+    let edge_y = 45;
+    for (x, y) in [
+        (6, 6),
+        (16, 10),
+        (26, 16),
+        (c.x, edge_y),
+        (c.x + c.width - 1, edge_y),
+    ] {
+        assert!(near_black(&px(x, y)), "({x}, {y}) {:?}", px(x, y));
     }
     for (x, y) in [(40, 10), (14, 27)] {
-        let red = img.get_pixel(x, y);
-        assert!(red.0[0] > 150 && red.0[1] < 100, "({x}, {y}) {red:?}");
+        assert!(red(&px(x, y)), "({x}, {y}) {:?}", px(x, y));
     }
-    for (x, y) in [(72, 16), (20, 48), (72, 48)] {
-        assert!(!near_black(img.get_pixel(x, y)), "({x}, {y})");
+    for (x, y) in [(72, 16), (20, 57), (72, 57)] {
+        assert!(!near_black(&px(x, y)), "({x}, {y})");
     }
 
-    // Undo in a reopened editor, then Done: the box is gone.
+    // Undo in a reopened editor, then Done: the last box is gone, the
+    // crop and the edge box stay.
     let (dialog, ed) = open_editor(&win);
-    assert_eq!(ed.to_options().1.len(), 1);
+    assert_eq!(ed.to_options().1.len(), 2);
     ed.activate_action("editor.undo", None).unwrap();
     finish(&win, &dialog, "dialog.done");
-    assert!(item.edit_options().1.is_empty());
+    assert_eq!(item.edit_options().1.len(), 1);
     let out = item.output().unwrap();
     let img = decode(&out.bytes, &out.extension);
-    let red = img.get_pixel(16, 10);
-    assert!(red.0[0] > 150 && red.0[1] < 100, "{red:?}");
+    assert_eq!(img.dimensions(), (c.width, c.height));
+    let px = |x: u32, y: u32| *img.get_pixel(x - c.x, y - c.y);
+    assert!(red(&px(16, 10)), "{:?}", px(16, 10));
+    assert!(near_black(&px(c.x, edge_y)));
 
     // The editor wrote nothing next to the input or in the private folder.
     assert_eq!(snapshot(dir.path()), before);
@@ -770,16 +845,24 @@ fn editor_closes_only_after_the_gesture_and_cancel_discards_edits() {
     let a = v.to_widget((10.0, 10.0));
     ed.drag_begin(a.0, a.1);
     ed.drag_update(40.0, 40.0);
-    // What Escape does: close asks first, and a press is in progress.
+    // The dialog's own Escape asks first, and a press is in progress.
+    press_dialog_escape(&dialog);
     dialog.close();
     assert!(win.visible_dialog().is_some());
     ed.drag_end(40.0, 40.0);
     assert_eq!(ed.to_options().1.len(), 1);
-    dialog.close();
-    let w = win.clone();
-    wait_until("dialog to close", PREPARE_TIMEOUT, || {
-        w.visible_dialog().is_none()
-    });
+    // Escape on the canvas is the editor's: it deselects, then leaves
+    // the canvas, and the dialog never sees it.
+    assert_eq!(ed.model().unwrap().selected(), Some(0));
+    assert!(ed.handle_key(gdk::Key::Escape, gdk::ModifierType::empty()));
+    assert_eq!(ed.model().unwrap().selected(), None);
+    assert!(ed.handle_key(gdk::Key::Escape, gdk::ModifierType::empty()));
+    assert!(focus(&win).is_ancestor(&ed.toolbar()));
+    // A key the canvas does not use bubbles up to the dialog's Escape.
+    assert!(win.visible_dialog().is_some());
+    // Outside the canvas and not in a gesture, Escape closes.
+    press_dialog_escape(&dialog);
+    wait_closed(&win);
     // Closing is Cancel: no edits stored, no new prepare.
     assert!(item.edits().is_none());
     assert!(win.model().is_idle());
@@ -789,6 +872,20 @@ fn editor_closes_only_after_the_gesture_and_cancel_discards_edits() {
     let (dialog, _) = open_editor(&win);
     finish(&win, &dialog, "dialog.cancel");
     assert!(item.edits().is_none());
+
+    // Edits for another size (the file changed) are dropped as soon as
+    // the editor opens, and the item is prepared without them.
+    let mut stale = EditModel::new(10, 10);
+    stale.add(AreaKind::Box, Rect::new(0, 0, 5, 5));
+    win.model().set_edits(&item, stale);
+    wait_idle(&win);
+    assert_eq!(item.edit_options().1.len(), 1);
+    let (dialog, ed) = open_editor(&win);
+    assert_eq!(ed.model().unwrap().size(), (96, 64));
+    assert!(item.edits().is_none());
+    assert!(item.busy());
+    finish(&win, &dialog, "dialog.cancel");
+    assert!(item.edit_options().1.is_empty());
     win.destroy();
 }
 

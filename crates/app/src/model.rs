@@ -125,6 +125,15 @@ impl Model {
     /// Stores the editor's edits on `item`. If its crop or redactions
     /// changed, the item is prepared again.
     pub fn set_edits(&self, item: &ImageItem, edits: EditModel) {
+        self.replace_edits(item, Some(edits));
+    }
+
+    /// Drops the edits of `item`, as when they no longer fit the image.
+    pub fn clear_edits(&self, item: &ImageItem) {
+        self.replace_edits(item, None);
+    }
+
+    fn replace_edits(&self, item: &ImageItem, edits: Option<EditModel>) {
         if self.0.store.find(item).is_none() {
             return;
         }

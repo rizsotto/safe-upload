@@ -48,10 +48,16 @@ pub fn open(win: &Window, item: &ImageItem, return_focus: Option<gtk::Widget>) {
 
 fn present(win: &Window, item: &ImageItem, preview: Preview, return_focus: Option<gtk::Widget>) {
     let (w, h) = preview.full_size;
-    let model = item
-        .edits()
-        .filter(|m| m.size() == (w, h))
-        .unwrap_or_else(|| EditModel::new(w, h));
+    // Edits made for another size (the file changed) would land in the
+    // wrong place: drop them now, not only on Done.
+    let model = match item.edits() {
+        Some(m) if m.size() == (w, h) => m,
+        Some(_) => {
+            win.model().clear_edits(item);
+            EditModel::new(w, h)
+        }
+        None => EditModel::new(w, h),
+    };
     let editor = RedactionEditor::new();
     if editor.load(preview.pixels, model).is_err() {
         win.toast(&gettext("The image could not be shown in the editor"));
@@ -84,7 +90,9 @@ fn present(win: &Window, item: &ImageItem, preview: Preview, return_focus: Optio
     view.set_content(Some(&editor));
 
     // Escape and other closes ask first, so a press or a held arrow key
-    // is never cut off.
+    // is never cut off. Escape on the canvas is the editor's own (it
+    // deselects, then moves focus to the toolbar); the dialog only sees
+    // an Escape the canvas did not use.
     let dialog = adw::Dialog::builder()
         .title(gettext("Edit Image"))
         .content_width(900)
