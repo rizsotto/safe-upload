@@ -1,8 +1,10 @@
 use crate::Error;
+use crate::edit::{Rect, Redaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
-    /// PNG with real transparency stays PNG. Everything else becomes JPEG.
+    /// Any input with real transparency becomes PNG. Everything else
+    /// becomes JPEG.
     #[default]
     Auto,
     Jpeg,
@@ -16,6 +18,10 @@ pub struct Options {
     pub max_long_edge: Option<u32>,
     pub format: OutputFormat,
     pub keep_name: bool,
+    /// Crop, in coordinates after orientation (SPEC 9.4).
+    pub crop: Option<Rect>,
+    /// Redactions, in coordinates after orientation and before the crop.
+    pub redactions: Vec<Redaction>,
 }
 
 impl Options {
@@ -25,6 +31,8 @@ impl Options {
             max_long_edge: None,
             format: OutputFormat::Auto,
             keep_name: false,
+            crop: None,
+            redactions: Vec::new(),
         }
     }
 }

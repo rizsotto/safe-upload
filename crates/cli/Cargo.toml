@@ -8,3 +8,11 @@ publish.workspace = true
 [[bin]]
 name = "safe-upload"
 path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+safe-upload-core = { path = "../core" }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

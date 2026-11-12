@@ -114,8 +114,11 @@ mk -size 64x64 xc:none -fill red -draw "circle 32,32 32,8" -strip PNG32:alpha.pn
 #    brands mif1 and heic (decision 0001). No HEVC encoder needed.
 printf '\000\000\000\030ftypheic\000\000\000\000mif1heic' >heif-header.heic
 
-# 6. Display P3 JPEG: P3 red, profile attached, pixels not converted.
-mk -size 64x64 xc:"rgb(255,0,0)" -strip -quality 95 p3.jpg
+# 6. Display P3 JPEG, profile attached, pixels not converted. Left half
+#    P3 red, right half the mid-tone rgb(200,120,80), which is sRGB
+#    rgb(213,115,70): pure red clips to sRGB red, the mid-tone does not.
+mk -size 32x64 xc:"rgb(255,0,0)" -size 32x64 xc:"rgb(200,120,80)" +append \
+    -strip -quality 95 p3.jpg
 et "-ICC_Profile<=display-p3.icc" p3.jpg
 
 # 7. Huge image: a real JPEG whose SOF header claims 20000x20000 (400 MP).

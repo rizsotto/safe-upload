@@ -10,13 +10,16 @@ mod limits;
 mod options;
 pub mod orient;
 pub mod output;
+pub mod pipeline;
 pub mod sniff;
+pub mod summary;
 pub mod verify;
 
 pub use error::Error;
 pub use limits::Limits;
 pub use options::{Options, OutputFormat, parse_size};
 pub use orient::Orientation;
+pub use pipeline::{Prepared, Target, prepare};
 pub use sniff::Format;
 
 pub fn version() -> &'static str {
