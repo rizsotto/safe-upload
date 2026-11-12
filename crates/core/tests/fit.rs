@@ -1,11 +1,11 @@
 //! T11: fit-to-size with the real JPEG encoder (SPEC 13 property test).
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use image::{Rgba, RgbaImage};
 use proptest::prelude::*;
 use safe_upload_core::Error;
-use safe_upload_core::encode::{JpegEncoder, Pixels};
+use safe_upload_core::encode::{Encoder, JpegEncoder, Pixels, PngEncoder};
 use safe_upload_core::fit::fit;
 use safe_upload_core::verify::verify;
 
@@ -46,10 +46,10 @@ proptest! {
             Ok(f) => {
                 let len = f.bytes.len() as u64;
                 prop_assert!(len <= target);
-                // FR-3: at least 85% when the best quality at full size
-                // does not fit anyway.
+                // FR-3, with the 80% bound of decision 0002: when the best
+                // quality at full size does not fit anyway.
                 if f.quality < 92 || f.width < WIDTH {
-                    prop_assert!(len * 100 >= target * 85, "{} for {}", len, target);
+                    prop_assert!(len * 100 >= target * 80, "{} for {}", len, target);
                 }
                 verify(&f.bytes, None).unwrap();
             }
@@ -57,4 +57,64 @@ proptest! {
             Err(e) => prop_assert!(false, "unexpected error: {}", e),
         }
     }
+}
+
+/// The JPEG encoder, counting the encodes of the full-size image.
+#[derive(Default)]
+struct Counting {
+    full: Mutex<Vec<u8>>,
+}
+
+impl Encoder for Counting {
+    fn encode(&self, px: &Pixels, quality: u8) -> Result<Vec<u8>, Error> {
+        if px.image.width() == WIDTH {
+            self.full.lock().unwrap().push(quality);
+        }
+        JpegEncoder.encode(px, quality)
+    }
+    fn extension(&self) -> &'static str {
+        "jpg"
+    }
+}
+
+/// NFR-1: the sample predicts the quality, so a typical photo needs one
+/// encode of the full image, and at most one more to correct it.
+#[test]
+fn typical_targets_need_one_full_encode() {
+    let mut total = 0;
+    for target in [400_000, 600_000, 800_000] {
+        let counting = Counting::default();
+        let f = fit(photo(), target, None, &counting).unwrap();
+        assert!(f.bytes.len() as u64 <= target);
+        assert!(f.bytes.len() as u64 * 100 >= target * 80);
+        assert_eq!(f.width, WIDTH);
+        let full = counting.full.lock().unwrap();
+        assert!(full.len() <= 2, "{target}: {full:?}");
+        total += full.len();
+    }
+    assert_eq!(total, 3);
+}
+
+/// PNG with transparency fits by quantizing, then by scaling (SPEC 9.3).
+#[test]
+fn png_with_alpha_fits_or_errors() {
+    let image = RgbaImage::from_fn(800, 600, |x, y| {
+        let p = photo().image.get_pixel(x, y).0;
+        Rgba([p[0], p[1], p[2], (x % 256) as u8])
+    });
+    let px = Pixels::new(image, None);
+    let lossless = PngEncoder.encode(&px, 100).unwrap().len() as u64;
+    for target in [lossless / 2, lossless / 3] {
+        let f = fit(&px, target, None, &PngEncoder).unwrap();
+        let len = f.bytes.len() as u64;
+        assert!(len <= target, "{target}");
+        assert!(len * 100 >= target * 80, "{len} for {target}");
+        // Quantizing alone is not enough for this noisy image.
+        assert!(f.width < 800, "{target}");
+        verify(&f.bytes, None).unwrap();
+    }
+    assert!(matches!(
+        fit(&px, 1000, None, &PngEncoder),
+        Err(Error::CannotFit { .. })
+    ));
 }

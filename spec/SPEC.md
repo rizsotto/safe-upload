@@ -96,7 +96,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 ### Functional
 - **FR-1** Remove EXIF, XMP, IPTC, MakerNotes, GPS, embedded thumbnails, PNG text chunks (`tEXt`, `iTXt`, `zTXt`), PNG `eXIf`, and HEIC metadata items.
 - **FR-2** Apply the EXIF orientation to the pixels **before** removing metadata, so the image does not end up sideways.
-- **FR-3** Fit-to-size: the output file must be ≤ the target size. It should be ≥ 85% of the target when that is possible (so quality is not thrown away for nothing).
+- **FR-3** Fit-to-size: the output file must be ≤ the target size. It should be ≥ 80% of the target when that is possible (so quality is not thrown away for nothing).
 - **FR-4** If the target cannot be met at the minimum quality and minimum size (see 9.3), fail with a clear message. Never return a file above the target.
 - **FR-5** Redactions are burned into the pixels before encoding. The output has no layers and no undo history.
 - **FR-6** The output name is `image.jpg`, or `image-1.jpg`, `image-2.jpg` and so on for a batch. A setting can keep original names.
@@ -248,29 +248,42 @@ and our own config names the delegate (for example `delegate=gnome` or `delegate
 Dropping a Display P3 profile (common on phones) without converting makes colors look washed out. Converting to sRGB and dropping the profile is both safe and correct.
 
 ### 9.3 Fit-to-size
+Predict the settings from a small sample, encode the image once, and correct only if that encode misses (decision 0002).
 ```
 input: pixels, target_bytes, max_long_edge (optional), format
+# quality range [Q_MIN, Q_MAX]: JPEG 40..92, PNG 40..100 (100 = lossless)
 scale = min(1.0, max_long_edge / long_edge)
 floor = min(scale, MIN_LONG_EDGE (640) / long_edge)
+overhead = len(encode(8x8 corner, Q_MAX))      # headers and profile, not per pixel
+ratio = 1.0                                     # actual / predicted, learned from full encodes
 loop:
-    img = resize(pixels, scale)            # Lanczos3
-    # quality range [Q_MIN, Q_MAX]: JPEG 40..92, PNG 40..100 (100 = lossless)
-    round 1: encode Q_MAX and Q_MIN       # in parallel
-    if len(Q_MAX) <= target_bytes: return it
-    if len(Q_MIN) > target_bytes:
-        if scale <= floor: error "cannot fit"
-        # size is about proportional to the pixel count
-        scale = max(floor, scale * min(0.95, 0.95 * sqrt(target_bytes / len(Q_MIN))))
-        continue
-    best = Q_MIN; hi = Q_MAX
-    rounds 2 and 3, while hi - best.q > 1 and len(best) < 0.9 * target_bytes:
-        # regula falsi on log(size): JPEG size grows about exponentially with q
-        g = best.q + (ln(0.97 * target) - ln(len(best))) / (ln(len(hi)) - ln(len(best))) * (hi - best.q)
-        encode g - d, g, g + d, clamped into (best.q, hi), d = max(1, (hi - best.q) / 8)   # in parallel
-        best = the highest quality that fits; hi = the lowest quality above it that does not
-    return best
+    sample = 8x8 grid of tiles, 64 px each (less if the short edge is under 512,
+             a multiple of 16 when possible), one from the middle of each grid cell,
+             at the output scale (Lanczos3); the whole scaled image if it has at
+             most 512x512 pixels
+    predict(q) = overhead + (len(encode(sample, q)) - overhead) * pixels(image) / pixels(sample)
+    q = highest quality with predict(q) * ratio <= 0.95 * target   # binary search on the sample
+    if no q and (scale <= floor or predict(Q_MIN) * ratio <= target): q = Q_MIN   # try it for real
+    if q:
+        out = at_scale(q)
+        if out: return out
+        if scale <= floor: error "cannot fit"          # Q_MIN at the floor was encoded and is too big
+    scale = max(floor, scale * min(0.95, (0.95 * target / (predict(Q_MIN) * ratio)) ^ (1 / 1.7)))
+
+at_scale(q):                                    # at most 8 full encodes
+    out = encode(resize(pixels, scale), q)
+    ratio = len(out) / predict(q)
+    if len(out) <= target:
+        if len(out) >= 0.8 * target or q == Q_MAX: return out
+        q2 = highest quality above q with predict(q2) * ratio <= 0.95 * target   # one try up
+        return encode(q2) if it fits, else out
+    if q == Q_MIN: return none
+    q2 = highest quality below q with predict(q2) * ratio <= 0.95 * target, else Q_MIN   # one try down
+    then binary search between the best quality that fits (or Q_MIN - 1) and the
+    lowest that does not, stopping at the first output >= 0.8 * target
+    return the best output that fits, or none
 ```
-The search never returns a file above the target. It usually takes two rounds, instead of the 6 or 7 sequential encodes of a binary search (NFR-1).
+The search never returns a file above the target. It stops at 80% of the target or more. Most photos need one full encode, a few need two; at one scale it never needs more than 8 (decision 0002 has the data).
 - PNG input with transparency → output PNG. Fit by quantizing (`imagequant`) and then scaling. If that fails, tell the user, or offer WebP if they allow it.
 - PNG input without transparency → JPEG by default (much smaller for photos).
 - Cache encodes so the UI preview does not encode twice.
