@@ -8,6 +8,7 @@ One file per decision. Copy `0000-template.md` to the next free number. See
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-heic-decoding-and-fixtures.md) | HEIC decoding and fixtures in the devcontainer and CI | accepted. HEIC decoding moves to M2; M1 refuses HEIC (T18) |
+| [0002](0002-fit-size-prediction.md) | Predict the fit-to-size settings from a tile sample instead of searching (NFR-1) | proposed. Option B built on `m2/fit-predict` |
 
 No open question in SPEC section 16 blocks M1.
 
