@@ -14,6 +14,8 @@ jobs:
           configFile: .github/ci/devcontainer.json
           runCmd: |
             set -euo pipefail
+            build-aux/ci/test-check-no-network-crates.sh
+            build-aux/ci/check-no-network-crates.sh Cargo.lock
             cargo fmt --all -- --check
             cargo clippy --workspace --all-targets -- -D warnings
             cargo test --workspace
