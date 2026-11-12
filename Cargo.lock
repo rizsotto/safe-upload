@@ -1557,6 +1557,7 @@ dependencies = [
  "futures-lite",
  "getrandom 0.3.4",
  "glycin",
+ "image",
  "miniz_oxide 0.8.9",
  "thiserror",
 ]

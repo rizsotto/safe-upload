@@ -3,6 +3,7 @@
 mod error;
 mod limits;
 mod options;
+pub mod orient;
 pub mod output;
 pub mod sniff;
 pub mod verify;
@@ -10,6 +11,7 @@ pub mod verify;
 pub use error::Error;
 pub use limits::Limits;
 pub use options::{Options, OutputFormat, parse_size};
+pub use orient::Orientation;
 pub use sniff::Format;
 
 pub fn version() -> &'static str {
