@@ -20,9 +20,21 @@ RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress libavif-tool
 
 # HEVC for HEIC decode and the HEIC fixtures (decision 0001, option A).
 # Stock Fedora has no HEVC codec; RPM Fusion free has libheif-freeworld.
-# libheif-tools gives heif-enc and heif-info.
-RUN dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        && dnf -y install libheif-freeworld libheif-tools && dnf clean all
+# libheif-tools gives heif-enc and heif-info. The RPM Fusion key comes from
+# Fedora's distribution-gpg-keys and must have the fingerprint published at
+# https://rpmfusion.org/keys ("RPM Fusion free repository for Fedora
+# (2020)", checked 2026-11-12); the release RPM must be signed with it.
+ARG RPMFUSION_FREE_FPR=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E
+RUN set -eu; dnf -y install distribution-gpg-keys; \
+    key=/usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-$(rpm -E %fedora); \
+    fpr=$(gpg -q --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10 }'); \
+    [ "$fpr" = "$RPMFUSION_FREE_FPR" ] || { echo "RPM Fusion key fingerprint is '$fpr'" >&2; exit 1; }; \
+    rpmkeys --import "$key"; \
+    curl -fsSLo /tmp/rpmfusion-free-release.rpm \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"; \
+    rpmkeys --checksig /tmp/rpmfusion-free-release.rpm; \
+    dnf -y install /tmp/rpmfusion-free-release.rpm; rm /tmp/rpmfusion-free-release.rpm; \
+    dnf -y install libheif-freeworld libheif-tools; dnf clean all
 
 # GTK app and headless UI tests (M2 plan, "Testing GTK headless"), plus
 # data file validators.
