@@ -1,8 +1,8 @@
 # 0001: HEIC decoding and fixtures in the devcontainer and CI
 
-- Status: proposed
-- Blocks: M1 (acceptance item "A HEIC input becomes a JPEG"), spike T05. Also
-  T02 (HEIC fixture), T06 and T15, which need T05.
+- Status: accepted
+- Blocks: M2 (HEIC acceptance items in SPEC 12). No longer blocks M1: M1
+  refuses HEIC (M1 task T18, test `heic_input_is_refused_with_exit_code_3`).
 - SPEC refs: section 8 (Decoding), 12 M1, 13 (fixtures), 15 (glycin HEIC
   fact), UC-4, NFR-2, S-4
 
@@ -219,6 +219,10 @@ Cons:
 
 ## Preferred option and why
 
+Note after acceptance: the steps below now apply to M2, not M1. Read "T05"
+as "the first M2 HEIC task". The `#[ignore]` test in step 4 is replaced by a
+normal test that runs in CI. See "Human decision".
+
 **Option A.** It is the only tested path that gives HEIC decode through glycin
 in the devcontainer and CI. The same packages also give the encoder for the
 fixture. No `runArgs` change is needed.
@@ -328,3 +332,33 @@ driven through `Gly-2` GObject introspection from Python, with
 `RUST_LOG=glycin_core=debug` to see the sandbox.
 
 ## Human decision
+
+Decision (2026-11-12, intent as given): "Go for a solution that ensures the
+usability of the tool. Broken functionality is not good. You can opt for
+later implementation if that enables progress short term."
+
+How it was applied:
+
+- **HEIC decoding moves from M1 to M2.** M2 ships the Flatpak. The GNOME
+  runtime gets HEVC from the `codecs-extra` extension on Flathub (section 1),
+  so HEIC can really work for users there. M1 is a host CLI. On stock Fedora
+  it could never decode HEIC, so "HEIC becomes JPEG" in M1 would pass in CI
+  (with RPM Fusion) and fail for most users. M3 is a host package too, so it
+  is no better. M2 is the first milestone where HEIC works for real users.
+- **M1 refuses HEIC/HEIF.** Detected by content (`ftyp` brands), not by file
+  name. Clear message, exit code 3, no output, never the original. The test
+  fixture is a 24 byte `ftyp` header written with `printf`, so no HEVC
+  encoder is needed. Details in `spec/milestones/M1/plan.md`.
+- **Option A is accepted for M2.** The devcontainer and CI add RPM Fusion's
+  `libheif-freeworld` in M2, not in M1. M1 drops `libheif-tools` and
+  `libheif-ffmpeg` from its package list.
+- **M2 acceptance (SPEC 12):** HEIC becomes an upright JPEG with no metadata
+  in the shipped Flatpak; dev and CI decode HEIC; a missing decoder at
+  runtime gives a clear message, not a failure.
+- **No skipped tests.** Every test runs in CI. glycin's silent fallback to no
+  sandbox on GitHub runners (section 4, "Not verified") is an open item in
+  SPEC 12 M2. It also matters for M1 decoding of JPEG and PNG, so M1 task T05
+  checks it first.
+- Still not verified and listed as M2 open items: HEIC through glycin's
+  `flatpak-spawn --sandbox` in the GNOME runtime, an end-to-end "decoder
+  missing" test, and a rotated HEIC fixture.

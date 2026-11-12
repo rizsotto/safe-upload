@@ -14,6 +14,8 @@ rules) are binding.
 
 - Work on the current milestone only. Its files are in `spec/milestones/MN/`.
 - One task per branch and pull request. Test first.
+- Every test runs in CI. No test is skipped or ignored because it needs a
+  tool; put the tool in the devcontainer instead.
 - Never use real keys, accounts, servers or the user's real home directory in
   tests.
 - Missing decision: follow "Blocked on a decision" in `spec/workflow.md`.

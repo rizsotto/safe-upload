@@ -14,8 +14,12 @@ Source: SPEC section 12, M1. IDs point to SPEC sections 5 (FR, NFR) and 10 (S).
   ([FR-1](../../SPEC.md#functional), [S-7](../../SPEC.md#10-security-and-privacy-rules-must))
 - [ ] An orientation-6 input comes out upright.
   ([FR-2](../../SPEC.md#functional))
-- [ ] A HEIC input becomes a JPEG.
-  (UC-4, [FR-1](../../SPEC.md#functional))
+- [ ] A HEIC/HEIF input is detected by content, not file name, and refused.
+  The CLI prints a clear message that says what to do and exits with code 3.
+  No crash, no garbled output, no output file, never the original passed
+  through. Test: `heic_input_is_refused_with_exit_code_3` (T18, T15).
+  HEIC decoding moves to M2 ([decision 0001](../../decisions/0001-heic-decoding-and-fixtures.md)).
+  ([S-6](../../SPEC.md#10-security-and-privacy-rules-must), UC-4)
 
 ## Also required by the spec for core work
 
@@ -45,4 +49,5 @@ written in M1.
 
 ## Out of scope for M1
 
-GTK app, redaction editor UI, portal backend, blur (waits on SPEC 16.4), FR-9.
+GTK app, redaction editor UI, portal backend, blur (waits on SPEC 16.4), FR-9, HEIC
+decoding (M2, decision 0001).

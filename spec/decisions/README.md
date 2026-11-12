@@ -7,7 +7,7 @@ One file per decision. Copy `0000-template.md` to the next free number. See
 
 | # | Decision | Status |
 |---|---|---|
-| [0001](0001-heic-decoding-and-fixtures.md) | HEIC decoding and fixtures in the devcontainer and CI | proposed, blocks M1 (HEIC acceptance item, T05) |
+| [0001](0001-heic-decoding-and-fixtures.md) | HEIC decoding and fixtures in the devcontainer and CI | accepted. HEIC decoding moves to M2; M1 refuses HEIC (T18) |
 
 No open question in SPEC section 16 blocks M1.
 

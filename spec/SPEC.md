@@ -320,13 +320,22 @@ safe-upload/
 - `exiftool out.jpg` shows no fields except basic file and image properties.
 - An embedded EXIF thumbnail is never present in the output.
 - An orientation-6 input comes out upright.
-- A HEIC input becomes a JPEG.
+- A HEIC/HEIF input is detected by its content, not its file name, and refused with a clear message and exit code 3. No crash, no garbled output, no output file, and never the original passed through. HEIC decoding comes in M2 (see [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
 
 ### M2: Standalone app
 - Drag-and-drop, batch, settings, summary, save and copy all work.
 - The redaction editor supports box, pixelate, blur and crop, with undo/redo.
 - Passes the Flatpak build with no network permission.
 - Keyboard-only walkthrough is possible. Orca reads all controls.
+- HEIC (UC-4): in the shipped Flatpak build, a HEIC input becomes an upright JPEG with no metadata. This replaces the M1 refusal.
+- The devcontainer and CI decode HEIC. They use RPM Fusion's `libheif-freeworld` ([decision 0001](decisions/0001-heic-decoding-and-fixtures.md), option A). Packages to add in M2: `rpmfusion-free-release`, `libheif-freeworld`, `libheif-tools` (for `heif-enc -e x265`, which makes the HEIC fixture).
+- If no HEVC decoder is present at runtime (for example a host install without RPM Fusion, or a Flatpak without the `codecs-extra` extension), the user gets a clear message and the CLI exits with code 3. Never a crash or a raw library error.
+- Every test runs in CI. None is skipped, ignored or silently degraded.
+- **Open items (resolve at the start of M2, do not guess):**
+  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. CI must fail when the sandbox is off, or this spec must say how CI handles it. Not yet decided.
+  - Not verified: the GNOME runtime decodes HEIC through glycin's `flatpak-spawn --sandbox` subsandbox with `codecs-extra`. If it does not, HEIC stays refused in the Flatpak and a new decision record is needed.
+  - How to test "decoder missing" end to end in CI, where the decoder is installed. A fake `Decoder` covers the error mapping. An end-to-end check (for example an empty libheif plugin path) is not verified.
+  - How to make a HEIC fixture with a rotation (`irot`) to test "upright". Not yet known.
 
 ### M3: Wrapper portal backend
 - With `portals.conf` routing FileChooser to our backend, Firefox and a GTK4 test app receive processed files when the preset is on, and originals when it is off.
@@ -347,7 +356,8 @@ safe-upload/
 - JPEG with each orientation value 1 to 8.
 - PNG with `tEXt`, `iTXt`, `eXIf` chunks.
 - PNG with transparency.
-- HEIC from an iPhone (or generated with `heif-enc`) with GPS.
+- HEIF header only: a hand-built `ftyp` box with brand `heic` (M1 refusal test, no HEVC encoder needed).
+- HEIC generated with `heif-enc -e x265` with GPS (M2, see decision 0001).
 - Display P3 JPEG.
 - Huge image (refused) and truncated file (clean error).
 
@@ -384,7 +394,7 @@ safe-upload/
 - [ ] That xdg-desktop-portal-gnome ≥ 47 uses Nautilus as the dialog, and how its backend behaves when called by another backend.
 - [ ] Whether `GtkFileChooserWidget` is deprecated since GTK 4.10 (it only affects the fallback idea, not the main design).
 - [ ] Whether Firefox and Chrome on GNOME use the portal file chooser by default outside Flatpak or Snap. Firefox has the setting `widget.use-xdg-desktop-portal.file-picker`.
-- [ ] Whether glycin's public API exposes the ICC profile and orientation, and whether it can decode HEIC in the user's runtime.
+- [ ] Whether glycin's public API exposes the ICC profile and orientation (M1), and whether it can decode HEIC in the user's runtime (M2, partly answered in [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
 - [ ] Whether `ashpd` supports implementing portal backends, or only plain `zbus` does.
 
 ---
@@ -398,6 +408,8 @@ safe-upload/
 5. Should the standalone app also register as a "Share" target in Files?
 6. Should the standalone app edit `portals.conf` for the user (with a diff and an undo), or only show instructions?
 7. First-time behavior per app: ask (proposed), or off until the user enables it?
+
+Decided: HEIC decoding moves to M2; M1 refuses HEIC. See [decision 0001](decisions/0001-heic-decoding-and-fixtures.md).
 
 ---
 

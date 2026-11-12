@@ -15,6 +15,7 @@ Status: draft. Review before tasks start.
 |---|---|---|
 | `options` | `Options`, `OutputFormat`, size parsing (`2MB`) | FR-3 |
 | `limits` | Max 200 MP, max file size, decode timeout | S-4 |
+| `sniff` | Detect HEIC/HEIF by content and refuse it, before decode | UC-4, S-6, decision 0001 |
 | `decode` | Untrusted file to `Decoded` | 9.1.1, NFR-2 |
 | `orient` | Apply EXIF orientation 1 to 8 to pixels | FR-2 |
 | `edit` | Crop, box, pixelate (blur waits on SPEC 16.4) | FR-5, 9.4 |
@@ -73,6 +74,22 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
   chunks with an allow list (JPEG: SOI, DQT, SOF, DHT, SOS, DRI, EOI, APP0
   JFIF, APP2 ICC; PNG: IHDR, PLTE, tRNS, IDAT, IEND, iCCP, sRGB, gAMA, cHRM).
   exiftool is used only in tests.
+- **HEIC/HEIF is refused in M1** (decision 0001). `sniff` reads the first
+  box of the file, never the name. It is HEIF if bytes 4..8 are `ftyp`. Then
+  it reads the major brand and the compatible brands. Refuse if any brand is
+  `heic`, `heix`, `heim`, `heis`, `hevc`, `hevx`, `mif1`, `mif2` or `msf1`,
+  unless a brand is `avif` or `avis` (AVIF is HEIF with AV1, which stock
+  Fedora decodes). A file cut off after the `ftyp` box is still refused. The
+  check runs before glycin sees the file, so the result is the same on hosts
+  that have an HEVC decoder. Error: `Error::UnsupportedFormat(Format::Heif)`.
+- **CLI exit codes.** 0 success. 1 any other error. 2 usage error (clap
+  default). 3 input format not supported in this build; in M1 only HEIC/HEIF.
+  The CLI checks all inputs before it processes any. If one is HEIC/HEIF, it
+  writes nothing and exits 3.
+- **HEIC message** (no file path, S-5): "Input 1 is a HEIC/HEIF image. This
+  version of safe-upload cannot read HEIC yet. Convert it to JPEG or PNG
+  first, then try again. On an iPhone, Settings > Camera > Formats > Most
+  Compatible saves new photos as JPEG."
 
 ## Dependencies to add (proposal)
 
@@ -83,31 +100,34 @@ GPL-3.0-or-later.
 
 ## Facts from SPEC section 15 that M1 relies on
 
-- [ ] glycin exposes the ICC profile and orientation, and decodes HEIC in our
-  runtime. This picks the decoder. If it fails, use `image` + `libheif-rs`
-  and run them in a sandbox or accept memory-safe decoders only (NFR-2). If
-  neither path works, open a decision record.
+- [ ] glycin exposes the ICC profile and orientation. This picks the decoder.
+  If it fails, use `image` + `libheif-rs` and run them in a sandbox or accept
+  memory-safe decoders only (NFR-2). If neither path works, open a decision
+  record. HEIC decode is not needed in M1 (decision 0001).
 
 No other section 15 item is needed for M1. They are all portal or GTK facts.
 
 ## Risks found while bootstrapping (verify in task T05)
 
-- Fedora's `libheif` has no HEVC decoder. `libde265` and `x265` are only in
-  RPM Fusion. The devcontainer installs `libheif-ffmpeg`, which may decode
-  HEVC through Fedora's ffmpeg. Not verified. glycin's HEIF loader has the
-  same dependency. If HEIC decode fails, M1's "HEIC becomes JPEG" is blocked.
-  Add this as a section 15 fact.
-- `heif-enc` needs an HEVC encoder to make the HEIC fixture. Stock Fedora
-  likely has none. Fallback: commit a small HEIC file with a known free
-  license.
-- glycin runs loaders under bubblewrap. bwrap may not work inside a rootless
-  podman container. Check, and document any extra `runArgs`.
+- HEIC: stock Fedora has no HEVC decoder or encoder. Settled by decision
+  0001: M1 refuses HEIC, M2 adds decoding with RPM Fusion in dev and CI.
+- glycin's bwrap works in our rootless podman devcontainer with the current
+  `runArgs` (decision 0001, section 4). It may be blocked on GitHub runners.
+  With the `Auto` selector glycin then silently decodes without a sandbox.
+  This affects JPEG and PNG in M1 too. T05 records what happens on the CI
+  runner. CI must not pass with the sandbox silently off. If T05 cannot fix
+  this, stop and open a decision record (see SPEC 12, M2 open items).
 
 ## Test strategy
 
-- **Fixtures.** `tests/fixtures/make.sh` builds every file in SPEC 13 with
-  ImageMagick and exiftool. Generated files are not committed (except the HEIC
-  file if needed). Tests call the script once, or CI runs it first.
+- **Fixtures.** `tests/fixtures/make.sh` builds every M1 file in SPEC 13 with
+  ImageMagick and exiftool. Generated files are not committed. The HEIF
+  refusal fixture is a 24 byte `ftyp` box written with `printf` (size
+  `0x18`, `ftyp`, major brand `heic`, minor version 0, compatible brands
+  `mif1` and `heic`). No HEVC encoder is needed. Tests call the script once,
+  or CI runs it first.
+- **No skipped tests.** Every test runs in CI. No `#[ignore]`, no "skip if
+  tool missing".
 - **Unit tests** per module, on small synthetic buffers. `fit` uses a fake
   encoder whose size is a known function of quality and scale.
 - **Property test** (proptest): target from 100 KB to 10 MB. Output is under
@@ -128,7 +148,10 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 The devcontainer starts minimal (Rust only). Add these Fedora packages to
 `.devcontainer/Containerfile` in the task that first needs them:
 
-`libheif-devel libheif-tools libheif-ffmpeg libwebp-devel nasm cmake lcms2-devel libseccomp-devel glycin-devel glycin-loaders bubblewrap perl-Image-ExifTool ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glycin-devel glycin-loaders bubblewrap perl-Image-ExifTool ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+
+`libheif-tools`, `libheif-ffmpeg` and RPM Fusion's `libheif-freeworld` are
+for HEIC only. They wait for M2 (decision 0001).
 
 Also add `gtk4-devel libadwaita-devel` and `xvfb-run` for GTK tests when the
 first GTK crate gets real code.
