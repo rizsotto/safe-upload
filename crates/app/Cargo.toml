@@ -9,12 +9,12 @@ publish.workspace = true
 adw = { workspace = true, features = ["v1_6"] }
 gettext-rs.workspace = true
 gtk = { workspace = true, features = ["v4_10"] }
+libc = "0.2"
 safe-upload-core = { path = "../core" }
 safe-upload-editor-widget = { path = "../editor-widget" }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false }
-libc = "0.2"
 tempfile = "3"
 
 [[test]]
