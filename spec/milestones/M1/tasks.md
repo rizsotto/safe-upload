@@ -23,7 +23,7 @@ with no open needs can run in parallel.
 | T14 (done) | CLI: `safe-upload <IN>... --max-size <SIZE> [-o OUT] [--max-edge N] [--format F]`. Exit codes from plan; check all inputs before processing | T13 | assert_cmd: `safe-upload in.jpg --max-size 2MB -o out.jpg` exits 0, out.jpg under 2,000,000 bytes |
 | T15 (done) | Leak and acceptance tests: exiftool allow list on all outputs, thumbnail, orientation-6 visual, HEIC refusal | T02, T14 | The tests themselves, run in CI. Includes `heic_input_is_refused_with_exit_code_3` (assert_cmd): HEIF header fixture gives exit 3, the HEIC message on stderr, no file at `-o`, nothing in the private temp dir; same with a batch of one JPEG and the HEIF file |
 | T16 (done) | `summary` (FR-8): sizes, resolutions, removed metadata kinds. Optional for M1 | T13 | Unit: GPS fixture reports "Location"; no metadata values in `Display` output |
-| T17 | Accept M1: tick `spec.md` boxes with test names, update SPEC | T15 | Full `cargo test --workspace` in CI |
+| T17 (done) | Accept M1: tick `spec.md` boxes with test names, update SPEC | T15 | Full `cargo test --workspace` in CI |
 
 ## Parallel waves
 

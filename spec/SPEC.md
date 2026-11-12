@@ -319,6 +319,8 @@ safe-upload/
 ## 12. Milestones and acceptance criteria
 
 ### M1: Core + CLI
+Status: accepted 2026-11-12. Evidence for each item: [milestones/M1/spec.md](milestones/M1/spec.md).
+
 - `safe-upload in.jpg --max-size 2MB -o out.jpg` works.
 - All fixture tests pass (13).
 - `exiftool out.jpg` shows no fields except basic file and image properties.
