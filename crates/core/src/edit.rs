@@ -54,12 +54,54 @@ impl Redaction {
 /// Noise added to each pixelate block, per channel.
 pub const PIXELATE_NOISE: i16 = 8;
 
+/// A redaction on a downscaled preview, so it looks like the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewRedaction {
+    /// In preview pixels.
+    pub redaction: Redaction,
+    /// The pixelate block in preview pixels: the full-size
+    /// [`block_size`] scaled down. Ignored for boxes.
+    pub block: u32,
+    /// Seeds the pixelate noise, so the preview does not flicker. The
+    /// output itself always uses fresh random noise.
+    pub seed: u64,
+}
+
 /// Crops, then burns in the redactions. All rectangles are in the
 /// coordinates of `image` as given, before the crop.
 pub fn apply(
     image: RgbaImage,
     crop: Option<Rect>,
     redactions: &[Redaction],
+) -> Result<RgbaImage, Error> {
+    let items: Vec<_> = redactions
+        .iter()
+        .map(|&r| {
+            let block = match r {
+                Redaction::Pixelate { rect } => block_size(rect),
+                Redaction::Box { .. } => 0,
+            };
+            (r, block, None)
+        })
+        .collect();
+    apply_inner(image, crop, &items)
+}
+
+/// Burns redactions into a preview with given block sizes and seeded
+/// noise. For showing edits only; never for output.
+pub fn apply_preview(image: RgbaImage, redactions: &[PreviewRedaction]) -> RgbaImage {
+    let items: Vec<_> = redactions
+        .iter()
+        .map(|r| (r.redaction, r.block.max(1), Some(r.seed)))
+        .collect();
+    apply_inner(image, None, &items).expect("seeded noise and no crop cannot fail")
+}
+
+/// `None` seed: random noise from the OS.
+fn apply_inner(
+    image: RgbaImage,
+    crop: Option<Rect>,
+    redactions: &[(Redaction, u32, Option<u64>)],
 ) -> Result<RgbaImage, Error> {
     let (mut image, origin) = match crop {
         None => (image, (0, 0)),
@@ -72,8 +114,8 @@ pub fn apply(
         }
     };
     let mut noise = Vec::new();
-    for r in redactions {
-        match *r {
+    for &(r, block, seed) in redactions {
+        match r {
             Redaction::Box { rect, color } => {
                 if let Some(rect) = shift(rect, origin, &image) {
                     fill(&mut image, rect, Rgba([color[0], color[1], color[2], 255]));
@@ -81,13 +123,15 @@ pub fn apply(
             }
             Redaction::Pixelate { rect } => {
                 if let Some(local) = shift(rect, origin, &image) {
-                    // Block size comes from the region as the user drew it.
-                    let block = block_size(rect);
+                    // The block comes from the region as the user drew it.
                     let blocks = local.width.div_ceil(block) as usize
                         * local.height.div_ceil(block) as usize;
                     noise.resize(blocks * 3, 0);
-                    getrandom::fill(&mut noise)
-                        .map_err(|_| Error::InvalidEdit("no random numbers for the noise"))?;
+                    match seed {
+                        None => getrandom::fill(&mut noise)
+                            .map_err(|_| Error::InvalidEdit("no random numbers for the noise"))?,
+                        Some(seed) => seeded_noise(seed, &mut noise),
+                    }
                     pixelate(&mut image, local, block, &noise);
                 }
             }
@@ -107,7 +151,21 @@ fn shift(rect: Rect, (ox, oy): (u32, u32), image: &RgbaImage) -> Option<Rect> {
     Rect::new(x, y, w, h).clip(image.width(), image.height())
 }
 
-fn block_size(rect: Rect) -> u32 {
+/// SplitMix64 bytes. Preview only: predictable, not for output.
+fn seeded_noise(mut seed: u64, out: &mut [u8]) {
+    for chunk in out.chunks_mut(8) {
+        seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
+    }
+}
+
+/// The pixelate block for a region at full size (SPEC 9.4): at least
+/// 16 px and 1/40 of the short edge.
+pub fn block_size(rect: Rect) -> u32 {
     rect.width.min(rect.height).div_ceil(40).max(16)
 }
 
@@ -269,6 +327,38 @@ mod tests {
         assert_eq!(out.get_pixel(3, 2), src.get_pixel(3, 2));
         assert_eq!(out.get_pixel(104, 50), src.get_pixel(104, 50));
         assert_eq!(out.get_pixel(50, 72), src.get_pixel(50, 72));
+    }
+
+    #[test]
+    fn preview_uses_the_given_block_and_seed() {
+        let src = pattern(60, 40);
+        let rect = Rect::new(3, 2, 50, 30);
+        let item = |seed| PreviewRedaction {
+            redaction: Redaction::Pixelate { rect },
+            block: 5,
+            seed,
+        };
+        let out = apply_preview(src.clone(), &[item(7)]);
+        for by in (2..32).step_by(5) {
+            for bx in (3..53).step_by(5) {
+                let first = *out.get_pixel(bx, by);
+                for y in by..by + 5 {
+                    for x in bx..bx + 5 {
+                        assert_eq!(*out.get_pixel(x, y), first, "block {bx},{by}");
+                    }
+                }
+                // Blocks are 5 px, not the full-size 16.
+                assert_ne!(*out.get_pixel(bx + 5, by), first);
+            }
+        }
+        assert_eq!(out.get_pixel(2, 2), src.get_pixel(2, 2));
+        // Same seed, same pixels; another seed, other noise.
+        assert_eq!(apply_preview(src.clone(), &[item(7)]), out);
+        assert_ne!(apply_preview(src.clone(), &[item(8)]), out);
+        // A zero block is treated as one pixel.
+        let mut zero = item(1);
+        zero.block = 0;
+        apply_preview(src, &[zero]);
     }
 
     #[test]
