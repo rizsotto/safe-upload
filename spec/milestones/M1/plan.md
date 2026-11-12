@@ -122,3 +122,13 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 - **Fail closed test**: inject an encoder that adds an APP1 segment. `prepare`
   must return an error and leave no file behind.
 - **CLI test** (assert_cmd): the exact M1 command line.
+
+## Devcontainer packages to add
+
+The devcontainer starts minimal (Rust only). Add these Fedora packages to
+`.devcontainer/Containerfile` in the task that first needs them:
+
+`libheif-devel libheif-tools libheif-ffmpeg libwebp-devel nasm cmake lcms2-devel libseccomp-devel glycin-devel glycin-loaders bubblewrap perl-Image-ExifTool ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+
+Also add `gtk4-devel libadwaita-devel` and `xvfb-run` for GTK tests when the
+first GTK crate gets real code.
