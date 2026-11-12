@@ -160,10 +160,18 @@ impl EditModel {
         };
     }
 
-    /// Sets or clears the crop, clamped to the image. A crop fully outside
-    /// the image clears it.
+    /// Sets or clears the crop, clipped to the image. Unlike areas, a crop
+    /// is never grown or dropped by clamping, since that would keep pixels
+    /// the user cut away: a crop smaller than the minimum size, or outside
+    /// the image, is ignored and the old crop stays.
     pub fn set_crop(&mut self, r: Option<Rect>) {
-        let crop = r.and_then(|r| clamp(r, self.size));
+        let crop = match r {
+            None => None,
+            Some(r) => match clip_crop(r, self.size) {
+                Some(c) => Some(c),
+                None => return,
+            },
+        };
         self.edit(|m| m.crop = crop);
     }
 
@@ -250,7 +258,8 @@ impl EditModel {
         let now = self.snapshot();
         self.areas = s.areas;
         self.crop = s.crop;
-        self.select(self.selected);
+        // Indexes may now point at other areas.
+        self.selected = None;
         now
     }
 
@@ -277,6 +286,16 @@ fn clamp(r: Rect, size: (u32, u32)) -> Option<Rect> {
     let (x, w) = clamp_span(r.x, r.width, size.0, mw)?;
     let (y, h) = clamp_span(r.y, r.height, size.1, mh)?;
     Some(Rect::new(x, y, w, h))
+}
+
+/// Clips a crop to the image without growing it. `None` if what is left
+/// is smaller than the minimum size.
+fn clip_crop(r: Rect, size: (u32, u32)) -> Option<Rect> {
+    let (mw, mh) = min_size(size);
+    let x1 = r.x.saturating_add(r.width).min(size.0);
+    let y1 = r.y.saturating_add(r.height).min(size.1);
+    let (w, h) = (x1.saturating_sub(r.x), y1.saturating_sub(r.y));
+    (w >= mw.max(1) && h >= mh.max(1)).then(|| Rect::new(r.x, r.y, w, h))
 }
 
 fn clamp_span(start: u32, len: u32, limit: u32, min: u32) -> Option<(u32, u32)> {
@@ -522,8 +541,56 @@ mod tests {
         assert_eq!(m.crop(), Some(r(150, 50, 50, 50)));
         m.move_crop_by(-1000, 0);
         assert_eq!(m.crop(), Some(r(0, 50, 50, 50)));
+    }
+
+    #[test]
+    fn crop_is_never_grown_or_dropped_by_clamping() {
+        let mut m = model();
+        m.set_crop(Some(r(10, 10, 50, 50)));
+        // Too small or outside the image: ignored, the crop stays.
         m.set_crop(Some(r(300, 0, 10, 10)));
+        m.set_crop(Some(r(20, 20, 2, 50)));
+        m.set_crop(Some(r(198, 20, 10, 10)));
+        assert_eq!(m.crop(), Some(r(10, 10, 50, 50)));
+        // Clipped to the image is fine: that only cuts more.
+        m.set_crop(Some(r(150, 50, 100, 100)));
+        assert_eq!(m.crop(), Some(r(150, 50, 50, 50)));
+        m.set_crop(None);
         assert_eq!(m.crop(), None);
+    }
+
+    #[test]
+    fn undo_does_not_move_the_selection_to_another_area() {
+        let mut m = model();
+        m.add(AreaKind::Box, r(0, 0, 10, 10));
+        m.add(AreaKind::Box, r(20, 0, 10, 10));
+        m.add(AreaKind::Box, r(40, 0, 10, 10));
+        m.select(Some(2));
+        m.delete(0);
+        assert_eq!(m.areas()[m.selected().unwrap()].rect.x, 40);
+        assert!(m.undo());
+        if let Some(s) = m.selected() {
+            assert_eq!(m.areas()[s].rect.x, 40);
+        }
+        assert!(m.redo());
+        if let Some(s) = m.selected() {
+            assert_eq!(m.areas()[s].rect.x, 40);
+        }
+    }
+
+    #[test]
+    fn box_across_the_crop_edge_is_black_inside_the_crop() {
+        let mut m = model();
+        m.set_crop(Some(r(100, 0, 100, 100)));
+        m.add(AreaKind::Box, r(90, 10, 20, 20));
+        let (crop, redactions) = m.to_options();
+        let src = image::RgbaImage::from_pixel(200, 100, image::Rgba([200, 200, 200, 255]));
+        let out = safe_upload_core::edit::apply(src, crop, &redactions).unwrap();
+        assert_eq!(out.dimensions(), (100, 100));
+        for (x, y, p) in out.enumerate_pixels() {
+            let inside = x < 10 && (10..30).contains(&y);
+            assert_eq!(p.0[0] == 0, inside, "pixel {x},{y}");
+        }
     }
 
     #[test]

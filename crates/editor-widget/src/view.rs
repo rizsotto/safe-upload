@@ -53,6 +53,18 @@ impl ViewTransform {
         Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
 
+    /// The crop for the widget rectangle with corners `a` and `b`. Rounds
+    /// inward (ceil the start, floor the end), the reverse of
+    /// [`rect_to_image`](Self::rect_to_image): a crop must never keep
+    /// pixels the user cut away. `None` if no whole pixel is inside.
+    pub fn crop_to_image(&self, a: (f64, f64), b: (f64, f64)) -> Option<Rect> {
+        let (ax, ay) = self.to_image(a);
+        let (bx, by) = self.to_image(b);
+        let (x0, x1) = inward(ax, bx)?;
+        let (y0, y1) = inward(ay, by)?;
+        Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+
     /// The widget rectangle `(x, y, width, height)` of an image rect, for
     /// drawing.
     pub fn rect_to_widget(&self, r: Rect) -> (f64, f64, f64, f64) {
@@ -72,6 +84,13 @@ fn outward(a: f64, b: f64) -> (u32, u32) {
     let start = a.min(b).floor() as u32;
     let end = a.max(b).ceil() as u32;
     (start, end.max(start))
+}
+
+/// Whole pixels inside `[min(a, b), max(a, b)]`, or `None`.
+fn inward(a: f64, b: f64) -> Option<(u32, u32)> {
+    let start = a.min(b).ceil() as u32;
+    let end = a.max(b).floor() as u32;
+    (end > start).then_some((start, end))
 }
 
 #[cfg(test)]
@@ -104,15 +123,20 @@ mod tests {
                 scale: 0.01 + next() * 8.0,
                 offset: (next() * 300.0, next() * 300.0),
             };
-            let a = (v.offset.0 + next() * 900.0, v.offset.1 + next() * 900.0);
-            let b = (v.offset.0 + next() * 900.0, v.offset.1 + next() * 900.0);
+            // Some points start before the image, where the box is cut at 0.
+            let a = (
+                v.offset.0 + next() * 1100.0 - 200.0,
+                v.offset.1 + next() * 1100.0 - 200.0,
+            );
+            let b = (
+                v.offset.0 + next() * 1100.0 - 200.0,
+                v.offset.1 + next() * 1100.0 - 200.0,
+            );
             let r = v.rect_to_image(a, b);
             let (x, y, w, h) = v.rect_to_widget(r);
             let eps = 1e-9 * (1.0 + v.scale * 1000.0);
-            assert!(
-                x <= a.0.min(b.0) + eps && y <= a.1.min(b.1) + eps,
-                "{v:?} {a:?} {b:?}"
-            );
+            let lo = (a.0.min(b.0).max(v.offset.0), a.1.min(b.1).max(v.offset.1));
+            assert!(x <= lo.0 + eps && y <= lo.1 + eps, "{v:?} {a:?} {b:?}");
             assert!(
                 x + w >= a.0.max(b.0) - eps && y + h >= a.1.max(b.1) - eps,
                 "{v:?} {a:?} {b:?}"
@@ -134,5 +158,46 @@ mod tests {
         assert_eq!(r, Rect::new(0, 0, 4, 4));
         let r = v.rect_to_image((0.0, 0.0), (5.0, 5.0));
         assert_eq!((r.width, r.height), (0, 0));
+    }
+
+    #[test]
+    fn crop_rounds_inward() {
+        let v = ViewTransform {
+            scale: 0.5,
+            offset: (10.0, 10.0),
+        };
+        // Image x 3.0..9.0 stays; y 2.2..4.6 rounds in to 3..4.
+        let c = v.crop_to_image((14.5, 12.3), (11.5, 11.1));
+        assert_eq!(c, Some(Rect::new(3, 3, 6, 1)));
+        // Image 2.2..2.8 has no whole pixel inside.
+        assert_eq!(v.crop_to_image((11.1, 11.1), (11.4, 20.0)), None);
+        // Left of and above the image is cut at 0.
+        let c = v.crop_to_image((0.0, 0.0), (12.0, 12.0));
+        assert_eq!(c, Some(Rect::new(0, 0, 4, 4)));
+    }
+
+    #[test]
+    fn view_mapping_never_grows_a_crop() {
+        let mut seed = 0x9e37_79b9_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f64 / 1_000_000.0
+        };
+        for _ in 0..20_000 {
+            let v = ViewTransform {
+                scale: 0.01 + next() * 8.0,
+                offset: (next() * 300.0, next() * 300.0),
+            };
+            let a = (v.offset.0 + next() * 900.0, v.offset.1 + next() * 900.0);
+            let b = (v.offset.0 + next() * 900.0, v.offset.1 + next() * 900.0);
+            if let Some(c) = v.crop_to_image(a, b) {
+                let (x, y, w, h) = v.rect_to_widget(c);
+                let eps = 1e-9 * (1.0 + v.scale * 1000.0);
+                assert!(x >= a.0.min(b.0) - eps && y >= a.1.min(b.1) - eps);
+                assert!(x + w <= a.0.max(b.0) + eps && y + h <= a.1.max(b.1) + eps);
+            }
+        }
     }
 }
