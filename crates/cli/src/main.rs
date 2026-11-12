@@ -67,7 +67,7 @@ fn main() -> ExitCode {
 /// Never prints the path (S-5).
 fn fail(n: usize, e: &Error) -> u8 {
     match e {
-        Error::MissingDecoder(Format::Heif) => {
+        Error::MissingDecoder(Format::Heic) => {
             eprintln!(
                 "Input {n}: this HEIC image needs an HEVC decoder, which is not installed. \
                  On Fedora, install libheif-freeworld from RPM Fusion. In the Flatpak, \
@@ -99,7 +99,10 @@ fn run(cli: &Cli) -> Result<(), u8> {
     };
 
     // Check every input before processing any, so nothing is written when
-    // one is refused. A refused format wins over other errors.
+    // one is refused. A refused format wins over other errors. No format is
+    // refused in this version (HEIC is decoded since M2), so today this
+    // only catches unreadable inputs early; it stays so a future refusal
+    // still stops the whole batch before any work.
     let mut first_error = None;
     for (i, input) in cli.inputs.iter().enumerate() {
         if let Err(e) = sniff::check_file(input) {

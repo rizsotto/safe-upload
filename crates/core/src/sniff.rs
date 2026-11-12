@@ -12,7 +12,10 @@ use crate::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Format {
+    /// HEIF with no HEVC brand, so the codec it needs is not known.
     Heif,
+    /// HEIF with an HEVC brand: the needed codec is HEVC.
+    Heic,
     Avif,
 }
 
@@ -20,22 +23,23 @@ impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Format::Heif => f.write_str("HEIC/HEIF"),
+            Format::Heic => f.write_str("HEIC"),
             Format::Avif => f.write_str("AVIF"),
         }
     }
 }
 
-const HEIF_BRANDS: &[&[u8; 4]] = &[
-    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"mif2", b"msf1",
-];
+const HEVC_BRANDS: &[&[u8; 4]] = &[b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx"];
+const HEIF_BRANDS: &[&[u8; 4]] = &[b"mif1", b"mif2", b"msf1"];
 const AVIF_BRANDS: &[&[u8; 4]] = &[b"avif", b"avis"];
 
 /// How many bytes `check_file` reads from the start of a file.
 const HEAD_LEN: u64 = 4096;
 
 /// The HEIF family member in `b`, from the brands of its leading `ftyp`
-/// box: AVIF if it has an AVIF brand, else HEIF if it has a HEIF brand.
-/// `None` if there is no whole `ftyp` box with a 32 bit size.
+/// box: AVIF if it has an AVIF brand, else HEIC if it has an HEVC brand,
+/// else HEIF if it has a plain HEIF brand. `None` if there is no whole
+/// `ftyp` box with a 32 bit size.
 pub(crate) fn heif_family(b: &[u8]) -> Option<Format> {
     if b.get(4..8) != Some(b"ftyp") {
         return None;
@@ -54,6 +58,8 @@ pub(crate) fn heif_family(b: &[u8]) -> Option<Format> {
         .collect();
     if brands.iter().any(|b| AVIF_BRANDS.contains(b)) {
         Some(Format::Avif)
+    } else if brands.iter().any(|b| HEVC_BRANDS.contains(b)) {
+        Some(Format::Heic)
     } else if brands.iter().any(|b| HEIF_BRANDS.contains(b)) {
         Some(Format::Heif)
     } else {
@@ -98,12 +104,25 @@ mod tests {
     }
 
     #[test]
-    fn heif_brands_are_heif() {
+    fn hevc_brands_are_heic() {
         for h in [
             ftyp(b"heic", &[b"mif1", b"heic"]),
             ftyp(b"heix", &[]),
             ftyp(b"mif1", &[b"heic"]),
             ftyp(b"msf1", &[b"hevc"]),
+            ftyp(b"abcd", &[b"heim"]),
+            ftyp(b"abcd", &[b"heis"]),
+            ftyp(b"abcd", &[b"hevx"]),
+        ] {
+            assert_eq!(heif_family(&h), Some(Format::Heic), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn other_heif_brands_are_heif() {
+        for h in [
+            ftyp(b"mif1", &[]),
+            ftyp(b"msf1", &[b"mif1"]),
             // Major brand unknown, HEIF only in the compatible list.
             ftyp(b"abcd", &[b"mif2"]),
         ] {
@@ -144,7 +163,7 @@ mod tests {
         let mut v = ftyp(b"abcd", &[b"heic"]);
         v.push(0);
         v[3] = 21;
-        assert_eq!(heif_family(&v), Some(Format::Heif));
+        assert_eq!(heif_family(&v), Some(Format::Heic));
         v[3] = 19;
         assert_eq!(heif_family(&v), None);
     }

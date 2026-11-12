@@ -36,6 +36,7 @@ const INPUTS: &[&str] = &[
     "p3-nclx.avif",
     "heic-gps.heic",
     "heic-rot90.heic",
+    "heic-mirror.heic",
 ];
 
 /// The only keys `exiftool -a -u -G1 -s` may show, by group. Basic file
@@ -222,6 +223,7 @@ fn heic_becomes_a_clean_upright_jpeg() {
     for (input, size) in [
         ("heic-gps.heic", (640, 480)),
         ("heic-rot90.heic", (480, 640)),
+        ("heic-mirror.heic", (640, 480)),
     ] {
         env.cmd()
             .arg(fixtures().join(input))
@@ -243,12 +245,22 @@ fn heic_becomes_a_clean_upright_jpeg() {
         }
         let d = GlycinDecoder.decode(&out, &Limits::default()).unwrap();
         assert_eq!(d.pixels.dimensions(), size, "{input}");
-        if input == "heic-rot90.heic" {
-            // Red quadrant top-right: irot applied once, EXIF 6 ignored.
-            for ((x, y), red) in [((360, 160), true), ((120, 160), false), ((360, 480), false)] {
-                let p = d.pixels.get_pixel(x, y);
-                assert_eq!(p[0] > 200 && p[2] < 60, red, "({x},{y}) is {p:?}");
-            }
+        // Where the red quadrant is. rot90: top-right (irot applied once,
+        // EXIF 6 ignored). mirror: bottom-left as libheif shows it (imir
+        // applied once, EXIF 2 ignored).
+        let quadrants: &[((u32, u32), bool)] = match input {
+            "heic-rot90.heic" => &[((360, 160), true), ((120, 160), false), ((360, 480), false)],
+            "heic-mirror.heic" => &[
+                ((160, 120), false),
+                ((480, 120), false),
+                ((160, 360), true),
+                ((480, 360), false),
+            ],
+            _ => &[],
+        };
+        for &((x, y), red) in quadrants {
+            let p = d.pixels.get_pixel(x, y);
+            assert_eq!(p[0] > 200 && p[2] < 60, red, "{input}: ({x},{y}) is {p:?}");
         }
         fs::remove_file(&out).unwrap();
     }

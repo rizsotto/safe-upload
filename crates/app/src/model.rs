@@ -229,7 +229,7 @@ fn work(path: &Path, options: &Options) -> Result<Output, String> {
 pub fn row_error(e: &Error) -> String {
     match e {
         Error::Decode(_) => gettext("Not a supported image"),
-        Error::MissingDecoder(Format::Heif) => gettext(
+        Error::MissingDecoder(Format::Heic) => gettext(
             "This HEIC image needs an HEVC decoder, which is not installed. \
              On Fedora, install libheif-freeworld from RPM Fusion. In the Flatpak, \
              install the org.freedesktop.Platform.codecs-extra extension.",
@@ -295,12 +295,16 @@ mod tests {
              the decoder did not run in the sandbox"
         );
         assert!(
-            row_error(&Error::MissingDecoder(Format::Heif))
+            row_error(&Error::MissingDecoder(Format::Heic))
                 .starts_with("This HEIC image needs an HEVC decoder, which is not installed.")
         );
         assert_eq!(
+            row_error(&Error::MissingDecoder(Format::Heif)),
+            "This HEIC/HEIF image needs a codec that is not installed"
+        );
+        assert_eq!(
             row_error(&Error::MissingDecoder(Format::Avif)),
-            "No decoder for AVIF images is installed"
+            "This AVIF image needs a codec that is not installed"
         );
         assert_eq!(
             row_error(&Error::CannotFit { target_bytes: 1000 }),

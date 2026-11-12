@@ -35,6 +35,6 @@ fn missing_file_is_an_io_error() {
 fn message_says_what_format() {
     let msg = Error::UnsupportedFormat(Format::Heif).to_string();
     assert!(msg.contains("HEIC/HEIF"), "{msg}");
-    let msg = Error::MissingDecoder(Format::Heif).to_string();
-    assert_eq!(msg, "no decoder for HEIC/HEIF images is installed");
+    let msg = Error::MissingDecoder(Format::Heic).to_string();
+    assert_eq!(msg, "this HEIC image needs a codec that is not installed");
 }

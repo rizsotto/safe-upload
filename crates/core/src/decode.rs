@@ -138,13 +138,14 @@ fn open(bytes: Vec<u8>, limits: &Limits, family: Option<Format>) -> Result<glyci
 /// failure. glycin's error kind is private, so its remote errors are known
 /// by their `Display` prefix; `loader_errors_blame_the_file` guards that.
 ///
-/// A HEIF or AVIF file (`family`) whose codec plugin is missing is
-/// [`Error::MissingDecoder`]. libheif reports that only in the remote error
-/// text; the CLI test `heic_without_decoder_exits_3` guards the match.
+/// A HEIF or AVIF file (`family`) whose codec plugin or glycin loader is
+/// missing is [`Error::MissingDecoder`]. libheif reports a missing plugin
+/// only in the remote error text; the CLI test
+/// `heic_without_decoder_exits_3` guards the match.
 fn load_error(e: &glycin::Error, bad_file: &'static str, family: Option<Format>) -> Error {
     let text = e.to_string();
-    if e.unsupported_format().is_some() {
-        Error::Decode("unknown or unsupported image format")
+    if let Some(mime) = e.unsupported_format() {
+        unsupported(&mime, family)
     } else if e.is_timeout() {
         Error::Decode("decoding took too long")
     } else if let Some(missing) = missing_decoder(&text, family) {
@@ -153,6 +154,17 @@ fn load_error(e: &glycin::Error, bad_file: &'static str, family: Option<Format>)
         Error::Decode(bad_file)
     } else {
         Error::Sandbox("the decoder failed to start or stopped early")
+    }
+}
+
+/// MIME types glycin gives HEIF family files. If no loader is set up for
+/// one of these, the glycin-heif loader is not installed.
+const HEIF_MIME_TYPES: &[&str] = &["image/heif", "image/heic", "image/avif"];
+
+fn unsupported(mime: &str, family: Option<Format>) -> Error {
+    match family.filter(|_| HEIF_MIME_TYPES.contains(&mime)) {
+        Some(f) => Error::MissingDecoder(f),
+        None => Error::Decode("unknown or unsupported image format"),
     }
 }
 
@@ -309,7 +321,7 @@ mod tests {
     #[test]
     fn missing_plugin_text_maps_to_missing_decoder() {
         let text = "Remote error: Loader error: PluginLoadingError(NoMatchingDecoderInstalled)";
-        for f in [Format::Heif, Format::Avif] {
+        for f in [Format::Heic, Format::Heif, Format::Avif] {
             assert!(matches!(
                 missing_decoder(text, Some(f)),
                 Some(Error::MissingDecoder(g)) if g == f
@@ -319,6 +331,24 @@ mod tests {
         assert!(missing_decoder(text, None).is_none());
         let other = "Remote error: Loader error: invalid input";
         assert!(missing_decoder(other, Some(Format::Heif)).is_none());
+    }
+
+    #[test]
+    fn missing_heif_loader_maps_to_missing_decoder() {
+        assert!(matches!(
+            unsupported("image/heif", Some(Format::Heic)),
+            Error::MissingDecoder(Format::Heic)
+        ));
+        assert!(matches!(
+            unsupported("image/avif", Some(Format::Avif)),
+            Error::MissingDecoder(Format::Avif)
+        ));
+        // Brands say HEIF but glycin saw something else, or the reverse.
+        assert!(matches!(
+            unsupported("application/octet-stream", Some(Format::Heic)),
+            Error::Decode(_)
+        ));
+        assert!(matches!(unsupported("image/heif", None), Error::Decode(_)));
     }
 
     #[test]

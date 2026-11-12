@@ -163,6 +163,17 @@ fn heic_preview_is_upright() {
 }
 
 #[test]
+fn heic_mirror_preview_is_mirrored_once() {
+    let p = preview_of("heic-mirror.heic", 2048);
+    assert_eq!(p.full_size, (640, 480));
+    // Red bottom-left, as libheif shows it (fixtures/check.sh).
+    assert!(near(p.pixels.get_pixel(160, 360).0, [255, 0, 0], 60));
+    for (x, y) in [(160, 120), (480, 120), (480, 360)] {
+        assert!(near(p.pixels.get_pixel(x, y).0, [0, 0, 255], 60), "{x},{y}");
+    }
+}
+
+#[test]
 fn header_only_heif_preview_is_a_decode_error() {
     let err = preview(
         &fixtures().join("heif-header.heic"),
@@ -178,7 +189,7 @@ fn missing_decoder_is_passed_on() {
     struct NoCodec;
     impl Decoder for NoCodec {
         fn decode(&self, _: &Path, _: &Limits) -> Result<Decoded, Error> {
-            Err(Error::MissingDecoder(Format::Heif))
+            Err(Error::MissingDecoder(Format::Heic))
         }
     }
     let err = preview_with(
@@ -188,7 +199,7 @@ fn missing_decoder_is_passed_on() {
         &NoCodec,
     )
     .unwrap_err();
-    assert!(matches!(err, Error::MissingDecoder(Format::Heif)), "{err}");
+    assert!(matches!(err, Error::MissingDecoder(Format::Heic)), "{err}");
 }
 
 const CHILD: &str = "SAFE_UPLOAD_PREVIEW_CHILD";

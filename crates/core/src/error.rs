@@ -11,9 +11,9 @@ pub enum Error {
     FileTooLarge { bytes: u64, limit: u64 },
     #[error("{0} images are not supported in this version")]
     UnsupportedFormat(crate::Format),
-    /// The format is accepted, but the codec it needs is not installed
-    /// (HEVC for HEIC). Not a problem with the image.
-    #[error("no decoder for {0} images is installed")]
+    /// The format is accepted, but the codec or loader it needs is not
+    /// installed (HEVC for HEIC). Not a problem with the image.
+    #[error("this {0} image needs a codec that is not installed")]
     MissingDecoder(crate::Format),
     #[error("XDG_RUNTIME_DIR is not set or not usable")]
     NoRuntimeDir,
