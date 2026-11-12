@@ -100,10 +100,35 @@ GPL-3.0-or-later.
 
 ## Facts from SPEC section 15 that M1 relies on
 
-- [ ] glycin exposes the ICC profile and orientation. This picks the decoder.
-  If it fails, use `image` + `libheif-rs` and run them in a sandbox or accept
-  memory-safe decoders only (NFR-2). If neither path works, open a decision
-  record. HEIC decode is not needed in M1 (decision 0001).
+- [x] glycin exposes the ICC profile and orientation. This picks the decoder:
+  glycin (crate 4.0.5). Checked in T05, see SPEC 15. HEIC decode is not
+  needed in M1 (decision 0001).
+
+### T05 findings (glycin spike)
+
+- The `glycin` crate needs glib, gio, fontconfig and libseccomp (C) and
+  talks to its loader processes with zbus in peer-to-peer mode over a
+  socket pair. No session or system bus is used, so core still has no
+  D-Bus service dependency and tests run without `dbus-daemon`. No GTK
+  (`gdk4` is an optional feature we do not enable). No network crates.
+- ICC: `color_convert_icc_srgb(false)` keeps the profile for our own
+  conversion (T08). With `true` (the default) glycin converts to sRGB
+  inside the sandbox; T08 may use that instead of lcms2.
+- Orientation: `transformation_orientation()` returns gufo-common's
+  `Orientation`, whose values are the EXIF numbers (glycin does not
+  re-export the type). `apply_transformations(true)` applies it.
+- Sandbox: core must use `SandboxSelector::Bwrap`, never `Auto`. Under a
+  Docker-like seccomp profile `Auto` printed "Glycin running without
+  sandbox" and decoded anyway; `Bwrap` failed with "Loader process exited
+  early". `Image::active_sandbox_mechanism()` reports what ran.
+- T06 must handle these itself, glycin does not:
+  - `truncated.jpg` decodes without an error (the missing part is filled
+    in). T06 needs its own check, for example a missing JPEG EOI.
+  - `huge-dims.jpg` (header says 20000x20000) passes `load()` and
+    `next_frame()` allocates the full buffer. Check `details()` width and
+    height against `Limits` after `load()` and before `next_frame()`.
+    glycin's own `Limits` are per side (default 65535 x 65535) with a 60 s
+    timeout.
 
 No other section 15 item is needed for M1. They are all portal or GTK facts.
 
@@ -112,11 +137,13 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 - HEIC: stock Fedora has no HEVC decoder or encoder. Settled by decision
   0001: M1 refuses HEIC, M2 adds decoding with RPM Fusion in dev and CI.
 - glycin's bwrap works in our rootless podman devcontainer with the current
-  `runArgs` (decision 0001, section 4). It may be blocked on GitHub runners.
-  With the `Auto` selector glycin then silently decodes without a sandbox.
-  This affects JPEG and PNG in M1 too. T05 records what happens on the CI
-  runner. CI must not pass with the sandbox silently off. If T05 cannot fix
-  this, stop and open a decision record (see SPEC 12, M2 open items).
+  `runArgs` (decision 0001, section 4, confirmed in T05). It may be blocked
+  on GitHub runners. T05 forces `SandboxSelector::Bwrap`, so CI fails
+  rather than passing with the sandbox off. The CI job runs its container
+  with `seccomp=unconfined` and `apparmor=unconfined` and sets
+  `kernel.apparmor_restrict_unprivileged_userns=0` on the runner. Not yet
+  seen on a GitHub runner: check the first CI run. If bwrap still fails
+  there, open a decision record (see SPEC 12, M2 open items).
 
 ## Test strategy
 
@@ -148,7 +175,11 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 The devcontainer starts minimal (Rust only). Add these Fedora packages to
 `.devcontainer/Containerfile` in the task that first needs them:
 
-`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glycin-devel glycin-loaders bubblewrap perl-Image-ExifTool ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glib2-devel fontconfig-devel pkgconf-pkg-config glycin-loaders bubblewrap perl-Image-ExifTool perl-IO-Compress ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+
+(T05: the `glycin` crate needs `glib2-devel` and `fontconfig-devel`, not
+`glycin-devel`, which is the C library. T02: exiftool needs
+`perl-IO-Compress` to write `zTXt`.)
 
 `libheif-tools`, `libheif-ffmpeg` and RPM Fusion's `libheif-freeworld` are
 for HEIC only. They wait for M2 (decision 0001).

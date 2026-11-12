@@ -332,7 +332,7 @@ safe-upload/
 - If no HEVC decoder is present at runtime (for example a host install without RPM Fusion, or a Flatpak without the `codecs-extra` extension), the user gets a clear message and the CLI exits with code 3. Never a crash or a raw library error.
 - Every test runs in CI. None is skipped, ignored or silently degraded.
 - **Open items (resolve at the start of M2, do not guess):**
-  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. CI must fail when the sandbox is off, or this spec must say how CI handles it. Not yet decided.
+  - glycin's bwrap sandbox may be blocked on GitHub runners (Docker seccomp, Ubuntu AppArmor). With the `Auto` selector glycin then falls back to no sandbox and only warns. Partly settled in M1 T05: core forces `SandboxSelector::Bwrap` on the host, so decoding fails instead of running unsandboxed, and CI fails with it. Checked locally: under a Docker-like seccomp profile bwrap cannot create namespaces and the T05 test fails. CI turns off seccomp and AppArmor confinement for the job container and allows unprivileged user namespaces on the runner (`.github/ci/devcontainer.json`, `.github/workflows/ci.yml`). Not verified on a GitHub runner yet; check the first CI run. If bwrap still cannot run there, open a decision record. In Flatpak (M2) core must select `FlatpakSpawn` instead.
   - Not verified: the GNOME runtime decodes HEIC through glycin's `flatpak-spawn --sandbox` subsandbox with `codecs-extra`. If it does not, HEIC stays refused in the Flatpak and a new decision record is needed.
   - How to test "decoder missing" end to end in CI, where the decoder is installed. A fake `Decoder` covers the error mapping. An end-to-end check (for example an empty libheif plugin path) is not verified.
   - How to make a HEIC fixture with a rotation (`irot`) to test "upright". Not yet known.
@@ -394,7 +394,8 @@ safe-upload/
 - [ ] That xdg-desktop-portal-gnome ≥ 47 uses Nautilus as the dialog, and how its backend behaves when called by another backend.
 - [ ] Whether `GtkFileChooserWidget` is deprecated since GTK 4.10 (it only affects the fallback idea, not the main design).
 - [ ] Whether Firefox and Chrome on GNOME use the portal file chooser by default outside Flatpak or Snap. Firefox has the setting `widget.use-xdg-desktop-portal.file-picker`.
-- [ ] Whether glycin's public API exposes the ICC profile and orientation (M1), and whether it can decode HEIC in the user's runtime (M2, partly answered in [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
+- [x] glycin's public API exposes the ICC profile and the orientation (M1). Checked in task M1 T05 with the `glycin` crate 4.0.5 and Fedora `glycin-loaders` 2.2.6: `Loader::color_convert_icc_srgb(false)` keeps the profile, which `FrameDetails::color_icc_profile()` returns; `Image::transformation_orientation()` gives the EXIF orientation, and `Loader::apply_transformations(true)` applies it to the pixels. Test: `crates/core/tests/glycin_sandbox.rs`. Sources: glycin-core 4.0.5 `src/api/loader.rs`, `src/api/common.rs`.
+- [ ] Whether glycin can decode HEIC in the user's runtime (M2, partly answered in [decision 0001](decisions/0001-heic-decoding-and-fixtures.md)).
 - [ ] Whether `ashpd` supports implementing portal backends, or only plain `zbus` does.
 
 ---

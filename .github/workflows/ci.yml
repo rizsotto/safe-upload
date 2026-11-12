@@ -9,6 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # glycin decodes inside bwrap, which needs unprivileged user
+      # namespaces. Ubuntu's AppArmor blocks them by default. Core forces
+      # the sandbox, so the tests fail if bwrap cannot run (SPEC S-4).
+      - name: Allow user namespaces for bwrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: devcontainers/ci@v0.3
         with:
           configFile: .github/ci/devcontainer.json
