@@ -25,6 +25,12 @@ pub fn application() -> adw::Application {
     app
 }
 
+/// Checks for the settings schema before the app starts: a panic inside a
+/// GLib callback aborts the process.
 pub fn run() -> glib::ExitCode {
+    if settings::schema().is_none() {
+        eprintln!("safe-upload-app: {}: {}", settings::MISSING, config::APP_ID);
+        return glib::ExitCode::FAILURE;
+    }
     application().run()
 }
