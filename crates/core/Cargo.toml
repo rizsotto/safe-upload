@@ -18,4 +18,5 @@ png = "0.18"
 thiserror = "2"
 
 [dev-dependencies]
+glib = "0.22"
 proptest = "1"
