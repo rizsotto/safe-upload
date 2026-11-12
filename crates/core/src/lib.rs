@@ -3,10 +3,12 @@
 mod error;
 mod limits;
 mod options;
+pub mod sniff;
 
 pub use error::Error;
 pub use limits::Limits;
 pub use options::{Options, OutputFormat, parse_size};
+pub use sniff::Format;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

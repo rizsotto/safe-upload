@@ -9,6 +9,8 @@ pub enum Error {
     TooManyPixels { pixels: u64, limit: u64 },
     #[error("the file has {bytes} bytes, the limit is {limit}")]
     FileTooLarge { bytes: u64, limit: u64 },
+    #[error("{0} images are not supported in this version")]
+    UnsupportedFormat(crate::Format),
     #[error("input/output error: {0}")]
     Io(#[from] std::io::Error),
 }
