@@ -59,7 +59,16 @@ never above the runtime (4.24 / 1.10).
    install the org.freedesktop.Platform.codecs-extra extension." The CLI
    maps it to exit 3, the app shows it on the row. The text match is
    fragile, so an end-to-end test (below) guards it. `Format` keeps
-   `Heif`; `UnsupportedFormat` stays for future refusals.
+   `Heif`; `UnsupportedFormat` stays for future refusals. AVIF also
+   decodes through libheif plugins (dav1d, aom) in the same folder, so a
+   missing AV1 plugin gives the same text. The format comes from the
+   file's `ftyp` brands, not from the error: an HEVC brand (`heic`, `heix`,
+   `hevc`, `heim`, `heis`, `hevx`) is `MissingDecoder(Format::Heic)` with the
+   HEVC message above; other HEIF brands (`mif1`, `mif2`, `msf1` only) are
+   `Format::Heif` and AVIF is `Format::Avif`, both with the generic "needs a
+   codec that is not installed" (exit 3). If the glycin-heif loader itself
+   is missing (glycin `unsupported_format` with `image/heif`, `image/heic`
+   or `image/avif` for such a file), the error is the same.
 3. **Sandbox selector.** `GlycinDecoder` picks the mechanism at runtime:
    `FlatpakSpawn` if `/.flatpak-info` exists, else `Bwrap`. Never `Auto`,
    never `NotSandboxed`. After `load()` it checks

@@ -12,6 +12,7 @@ use common::fixtures;
 use env::Env;
 use safe_upload_core::Limits;
 use safe_upload_core::decode::{Decoder, GlycinDecoder};
+use safe_upload_core::verify::verify;
 
 /// Every fixture the pipeline accepts.
 const INPUTS: &[&str] = &[
@@ -33,6 +34,9 @@ const INPUTS: &[&str] = &[
     "rgb.avif",
     "alpha.avif",
     "p3-nclx.avif",
+    "heic-gps.heic",
+    "heic-rot90.heic",
+    "heic-mirror.heic",
 ];
 
 /// The only keys `exiftool -a -u -G1 -s` may show, by group. Basic file
@@ -214,10 +218,59 @@ fn every_orientation_comes_out_upright() {
 }
 
 #[test]
-fn heic_input_is_refused_with_exit_code_3() {
+fn heic_becomes_a_clean_upright_jpeg() {
+    let env = Env::new();
+    for (input, size) in [
+        ("heic-gps.heic", (640, 480)),
+        ("heic-rot90.heic", (480, 640)),
+        ("heic-mirror.heic", (640, 480)),
+    ] {
+        env.cmd()
+            .arg(fixtures().join(input))
+            .args(["--max-size", "2MB", "-o", "out.jpg"])
+            .assert()
+            .success();
+        let out = env.work.path().join("out.jpg");
+        let bytes = fs::read(&out).unwrap();
+        assert!(bytes.starts_with(&[0xff, 0xd8]), "{input}");
+        verify(&bytes, None).unwrap_or_else(|e| panic!("{input}: {e}"));
+        let keys = exiftool(&out);
+        for (group, key) in &keys {
+            for bad in ["GPS", "Make", "Model", "XMP", "Orientation"] {
+                assert!(
+                    !group.contains(bad) && !key.contains(bad),
+                    "{input}: [{group}] {key}"
+                );
+            }
+        }
+        let d = GlycinDecoder.decode(&out, &Limits::default()).unwrap();
+        assert_eq!(d.pixels.dimensions(), size, "{input}");
+        // Where the red quadrant is. rot90: top-right (irot applied once,
+        // EXIF 6 ignored). mirror: bottom-left as libheif shows it (imir
+        // applied once, EXIF 2 ignored).
+        let quadrants: &[((u32, u32), bool)] = match input {
+            "heic-rot90.heic" => &[((360, 160), true), ((120, 160), false), ((360, 480), false)],
+            "heic-mirror.heic" => &[
+                ((160, 120), false),
+                ((480, 120), false),
+                ((160, 360), true),
+                ((480, 360), false),
+            ],
+            _ => &[],
+        };
+        for &((x, y), red) in quadrants {
+            let p = d.pixels.get_pixel(x, y);
+            assert_eq!(p[0] > 200 && p[2] < 60, red, "{input}: ({x},{y}) is {p:?}");
+        }
+        fs::remove_file(&out).unwrap();
+    }
+}
+
+#[test]
+fn header_only_heif_exits_1_and_writes_nothing() {
     let env = Env::new();
     let heif = fixtures().join("heif-header.heic");
-    // Detected by content: the same bytes named .jpg are refused too.
+    // Detected by content: the same bytes named .jpg behave the same.
     let disguised = env.work.path().join("secret-name.jpg");
     fs::write(&disguised, common::fixture("heif-header.heic")).unwrap();
 
@@ -228,34 +281,12 @@ fn heic_input_is_refused_with_exit_code_3() {
             .args(["--max-size", "2MB", "-o", "out.jpg"])
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.status.code(), Some(1));
         let stderr = String::from_utf8(out.stderr).unwrap();
-        assert!(stderr.contains("HEIC"), "{stderr}");
-        assert!(stderr.contains("Convert it to JPEG or PNG"), "{stderr}");
+        assert!(stderr.contains("cannot decode the image"), "{stderr}");
         assert!(!stderr.contains("secret-name") && !stderr.contains("heif-header"));
         assert!(out.stdout.is_empty());
         assert!(!env.work.path().join("out.jpg").exists());
         assert_eq!(env.private_files(), 0);
     }
-
-    // A batch of one JPEG and the HEIF file: nothing is written at all.
-    let dest = env.work.path().join("dest");
-    fs::create_dir(&dest).unwrap();
-    let out = env
-        .cmd()
-        .arg(fixtures().join("exif-gps-thumb.jpg"))
-        .arg(&heif)
-        .args(["--max-size", "2MB", "-o"])
-        .arg(&dest)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        stderr.starts_with("Input 2 is a HEIC/HEIF image."),
-        "{stderr}"
-    );
-    assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
-    assert_eq!(env.private_files(), 0);
-    assert!(!env.runtime.path().join("safe-upload").exists());
 }

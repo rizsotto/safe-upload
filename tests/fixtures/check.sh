@@ -83,7 +83,7 @@ avif_info() { avifdec --info "$1" 2>/dev/null | sed -n "s/^ \* $2 *: //p"; }
 p3=$(avif_info p3-nclx.avif 'Color Primaries')/$(avif_info p3-nclx.avif 'Transfer Char.')/$(avif_info p3-nclx.avif 'Matrix Coeffs.')
 [ "$p3" = 12/13/0 ] || bad "p3-nclx.avif: CICP is $p3, not 12/13/0"
 [ "$(avif_info p3-nclx.avif 'ICC Profile')" = Absent ] || bad "p3-nclx.avif: has an ICC profile"
-for f in heic-gps.heic heic-rot90.heic; do
+for f in heic-gps.heic heic-rot90.heic heic-mirror.heic; do
     [ "$(head -c 12 "$f" | tail -c 8)" = ftypheic ] || bad "$f: no ftypheic at byte 4"
     has "$f" GPS:GPSLatitude GPS:GPSLongitude IFD0:Make IFD0:Model
 done
@@ -92,6 +92,14 @@ heif_size() { heif-info "$1" 2>/dev/null | sed -n 's/^image: \([0-9]*x[0-9]*\).*
 [ "$(heif_size heic-rot90.heic)" = 480x640 ] || bad "heic-rot90.heic: heif-info size is not 480x640"
 [ "$(exiftool -s3 -Rotation heic-rot90.heic)" = "Rotate 90 CW" ] || bad "heic-rot90.heic: no irot Rotation 90 CW"
 [ "$(exiftool -n -s3 -EXIF:Orientation heic-rot90.heic)" = 6 ] || bad "heic-rot90.heic: EXIF orientation is not 6"
+[ "$(heif_size heic-mirror.heic)" = 640x480 ] || bad "heic-mirror.heic: heif-info size is not 640x480"
+[ "$(exiftool -s3 -Mirroring heic-mirror.heic)" = Vertical ] || bad "heic-mirror.heic: no imir box with axis 0"
+[ "$(exiftool -n -s3 -EXIF:Orientation heic-mirror.heic)" = 2 ] || bad "heic-mirror.heic: EXIF orientation is not 2"
+mirror=$(mktemp -d)
+heif-dec heic-mirror.heic "$mirror/m.png" >/dev/null 2>&1 || bad "heic-mirror.heic: heif-dec failed"
+quads=$(magick "$mirror/m.png" -format '%[fx:p{160,120}.r>0.8]%[fx:p{480,120}.r>0.8]%[fx:p{160,360}.r>0.8]%[fx:p{480,360}.r>0.8]' info: || true)
+rm -rf "$mirror"
+[ "$quads" = 0010 ] || bad "heic-mirror.heic: libheif does not show red bottom-left ($quads)"
 [ -f .safe-upload-fixtures ] || bad "no .safe-upload-fixtures marker"
 
 [ "$fail" = 0 ] && echo "fixtures: all checks passed"

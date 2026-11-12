@@ -285,3 +285,130 @@ fn stale_private_folders_are_removed_on_start() {
     assert!(!old.exists());
     assert!(young.join("image.jpg").exists());
 }
+
+/// Where Fedora keeps the libheif codec plugins.
+const HEIF_PLUGINS: &str = "/usr/lib64/libheif";
+
+/// Hides every libheif plugin: an empty tmpfs over the plugin folder.
+fn hide_plugins() -> String {
+    format!("mount -t tmpfs none {HEIF_PLUGINS}")
+}
+
+/// Hides the glycin-heif loader: a tmpfs over glycin's `conf.d` with only
+/// the other loaders' files copied back.
+fn hide_heif_loader(env: &Env) -> String {
+    let confs: Vec<_> = glob_conf_d();
+    assert_eq!(confs.len(), 1, "glycin conf.d folders: {confs:?}");
+    let conf = confs[0].display();
+    let keep = env.work.path().join("conf-keep");
+    let keep = keep.display();
+    format!(
+        "mkdir '{keep}' && cp '{conf}'/* '{keep}' && mount -t tmpfs none '{conf}' && \
+         for f in '{keep}'/*; do case \"$f\" in *heif*) ;; *) cp \"$f\" '{conf}' ;; esac; done && \
+         rm -r '{keep}'"
+    )
+}
+
+fn glob_conf_d() -> Vec<std::path::PathBuf> {
+    fs::read_dir("/usr/share/glycin-loaders")
+        .expect("glycin loaders are in the devcontainer")
+        .map(|e| e.unwrap().path().join("conf.d"))
+        .filter(|p| p.join("glycin-heif.conf").is_file())
+        .collect()
+}
+
+/// Runs the CLI on `input` in a private mount namespace (`unshare -rm`)
+/// after `setup`. glycin's bwrap still runs inside it (M2 plan, "Decoder
+/// missing").
+fn run_hidden(env: &Env, setup: &str, input: &Path) -> (Option<i32>, String) {
+    let script = format!("{setup} && exec \"$0\" \"$@\"");
+    let out = std::process::Command::new("unshare")
+        .args([
+            "-rm",
+            "sh",
+            "-c",
+            &script,
+            env!("CARGO_BIN_EXE_safe-upload"),
+        ])
+        .arg(input)
+        .args(["--max-size", "5MB", "-o", "out.jpg"])
+        .env("XDG_RUNTIME_DIR", env.runtime.path())
+        .current_dir(env.work.path())
+        .output()
+        .expect("unshare is in the devcontainer");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let out_jpg = env.work.path().join("out.jpg");
+    if out.status.success() {
+        fs::remove_file(&out_jpg).unwrap();
+    } else {
+        assert!(out.stdout.is_empty(), "{stderr}");
+        assert!(!out_jpg.exists(), "{stderr}");
+        assert_eq!(env.private_files(), 0, "{stderr}");
+    }
+    (out.status.code(), stderr)
+}
+
+const HEVC_MESSAGE: &str = "this HEIC image needs an HEVC decoder, which is not installed";
+
+#[test]
+fn heic_without_decoder_exits_3() {
+    let plugins = fs::read_dir(HEIF_PLUGINS)
+        .unwrap_or_else(|e| panic!("{HEIF_PLUGINS}: {e}"))
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    assert!(
+        plugins
+            .iter()
+            .any(|p| p.contains("libde265") || p.contains("ffmpegdec")),
+        "no HEVC decoder plugin in {HEIF_PLUGINS}: {plugins:?}"
+    );
+    let env = Env::new();
+    let setup = hide_plugins();
+
+    // The setup itself works: a JPEG still decodes in bwrap.
+    let (code, stderr) = run_hidden(&env, &setup, &fixture("exif-gps-thumb.jpg"));
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let (code, stderr) = run_hidden(&env, &setup, &fixture("heic-gps.heic"));
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains(HEVC_MESSAGE), "{stderr}");
+    assert!(stderr.contains("libheif-freeworld"), "{stderr}");
+    assert!(!stderr.contains("heic-gps"), "{stderr}");
+
+    // HEIF with no HEVC brand: the codec is unknown, so no HEVC advice.
+    let mut mif1 = common::fixture("heic-gps.heic");
+    let size = u32::from_be_bytes(mif1[0..4].try_into().unwrap()) as usize;
+    for brand in mif1[8..size].as_chunks_mut::<4>().0 {
+        if brand == b"heic" {
+            brand.copy_from_slice(b"mif1");
+        }
+    }
+    let mif1_path = env.work.path().join("mif1.heif");
+    fs::write(&mif1_path, &mif1).unwrap();
+    let (code, stderr) = run_hidden(&env, &setup, &mif1_path);
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(
+        stderr.contains("this HEIC/HEIF image needs a codec that is not installed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("HEVC"), "{stderr}");
+
+    // AVIF needs a libheif plugin too; its message names AVIF, not HEVC.
+    let (code, stderr) = run_hidden(&env, &setup, &fixture("rgb.avif"));
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(
+        stderr.contains("this AVIF image needs a codec that is not installed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn heic_without_glycin_heif_loader_exits_3() {
+    let env = Env::new();
+    let setup = hide_heif_loader(&env);
+    let (code, stderr) = run_hidden(&env, &setup, &fixture("exif-gps-thumb.jpg"));
+    assert_eq!(code, Some(0), "{stderr}");
+    let (code, stderr) = run_hidden(&env, &setup, &fixture("heic-gps.heic"));
+    assert_eq!(code, Some(3), "{stderr}");
+    assert!(stderr.contains(HEVC_MESSAGE), "{stderr}");
+}

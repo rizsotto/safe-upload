@@ -1,5 +1,6 @@
-//! Detects formats this build refuses, by content and never by file name.
-//! In M1 that is HEIC/HEIF (decision 0001).
+//! Detects formats by content, never by file name. M1 refused HEIC/HEIF
+//! here; since M2 it is decoded (decision 0001), so no format is refused.
+//! [`Error::UnsupportedFormat`] stays for future refusals.
 
 use std::fmt;
 use std::io::Read;
@@ -7,68 +8,68 @@ use std::path::Path;
 
 use crate::Error;
 
-/// An input format that this build cannot process.
+/// An input format named in errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Format {
+    /// HEIF with no HEVC brand, so the codec it needs is not known.
     Heif,
+    /// HEIF with an HEVC brand: the needed codec is HEVC.
+    Heic,
+    Avif,
 }
 
 impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Format::Heif => f.write_str("HEIC/HEIF"),
+            Format::Heic => f.write_str("HEIC"),
+            Format::Avif => f.write_str("AVIF"),
         }
     }
 }
 
-const HEIF_BRANDS: &[&[u8; 4]] = &[
-    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"mif2", b"msf1",
-];
+const HEVC_BRANDS: &[&[u8; 4]] = &[b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx"];
+const HEIF_BRANDS: &[&[u8; 4]] = &[b"mif1", b"mif2", b"msf1"];
 const AVIF_BRANDS: &[&[u8; 4]] = &[b"avif", b"avis"];
 
 /// How many bytes `check_file` reads from the start of a file.
 const HEAD_LEN: u64 = 4096;
 
-/// Refuses HEIF unless it is AVIF. `head` is the start of the file.
-pub fn sniff(head: &[u8]) -> Result<(), Error> {
-    if head.get(4..8) != Some(b"ftyp") {
-        return Ok(());
+/// The HEIF family member in `b`, from the brands of its leading `ftyp`
+/// box: AVIF if it has an AVIF brand, else HEIC if it has an HEVC brand,
+/// else HEIF if it has a plain HEIF brand. `None` if there is no whole
+/// `ftyp` box with a 32 bit size.
+pub(crate) fn heif_family(b: &[u8]) -> Option<Format> {
+    if b.get(4..8) != Some(b"ftyp") {
+        return None;
     }
-    let declared = u32::from_be_bytes(head[0..4].try_into().unwrap()) as usize;
-    let (brands_start, box_end) = match declared {
-        0 => (8, head.len().max(16)),
-        1 => match head.get(8..16) {
-            Some(large) => (16, u64::from_be_bytes(large.try_into().unwrap()) as usize),
-            None => return Err(Error::UnsupportedFormat(Format::Heif)),
-        },
-        n => (8, n),
-    };
-    // A box too small for the major brand and minor version is malformed.
-    // Treat it as HEIF, so it is refused before any decoder sees it.
-    if box_end < brands_start + 8 {
-        return Err(Error::UnsupportedFormat(Format::Heif));
+    let size = u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize;
+    if size < 16 {
+        return None;
     }
-    let truncated = box_end > head.len();
-    let ftyp = &head[..box_end.min(head.len())];
+    let ftyp = b.get(8..size)?;
+    // Major brand, minor version, then compatible brands.
+    let brands: Vec<&[u8; 4]> = ftyp[..4]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .chain(ftyp[8..].as_chunks::<4>().0)
+        .collect();
+    if brands.iter().any(|b| AVIF_BRANDS.contains(b)) {
+        Some(Format::Avif)
+    } else if brands.iter().any(|b| HEVC_BRANDS.contains(b)) {
+        Some(Format::Heic)
+    } else if brands.iter().any(|b| HEIF_BRANDS.contains(b)) {
+        Some(Format::Heif)
+    } else {
+        None
+    }
+}
 
-    // Major brand at brands_start, minor version after it, then compatible
-    // brands to the end of the box.
-    let mut brands: Vec<&[u8; 4]> = Vec::new();
-    if let Some(major) = ftyp.get(brands_start..brands_start + 4) {
-        brands.extend(major.as_chunks::<4>().0);
-    }
-    if let Some(rest) = ftyp.get(brands_start + 8..) {
-        brands.extend(rest.as_chunks::<4>().0);
-    }
-
-    let is = |list: &[&[u8; 4]], b: &[u8; 4]| list.contains(&b);
-    if brands.iter().any(|b| is(AVIF_BRANDS, b)) {
-        return Ok(());
-    }
-    if truncated || brands.iter().any(|b| is(HEIF_BRANDS, b)) {
-        return Err(Error::UnsupportedFormat(Format::Heif));
-    }
+/// Refuses formats this build cannot process, from the start of the file.
+/// None are refused in this version.
+pub fn sniff(_head: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
@@ -97,63 +98,73 @@ mod tests {
         v
     }
 
-    fn refused(bytes: &[u8]) -> bool {
-        matches!(sniff(bytes), Err(Error::UnsupportedFormat(Format::Heif)))
+    #[test]
+    fn heif_is_no_longer_refused() {
+        assert!(sniff(&ftyp(b"heic", &[b"mif1", b"heic"])).is_ok());
     }
 
     #[test]
-    fn heif_brands_are_refused() {
-        assert!(refused(&ftyp(b"heic", &[b"mif1", b"heic"])));
-        assert!(refused(&ftyp(b"heix", &[])));
-        assert!(refused(&ftyp(b"mif1", &[b"heic"])));
-        assert!(refused(&ftyp(b"msf1", &[b"hevc"])));
-        // Major brand unknown, HEIF only in the compatible list.
-        assert!(refused(&ftyp(b"abcd", &[b"mif2"])));
-    }
-
-    #[test]
-    fn avif_passes() {
-        assert!(sniff(&ftyp(b"avif", &[b"mif1", b"miaf"])).is_ok());
-        assert!(sniff(&ftyp(b"mif1", &[b"avif"])).is_ok());
-        assert!(sniff(&ftyp(b"avis", &[b"msf1"])).is_ok());
-    }
-
-    #[test]
-    fn other_ftyp_brands_pass() {
-        assert!(sniff(&ftyp(b"isom", &[b"mp41"])).is_ok());
-    }
-
-    #[test]
-    fn jpeg_and_png_pass() {
-        assert!(sniff(&[0xff, 0xd8, 0xff, 0xe0, 0, 16, b'J', b'F', b'I', b'F']).is_ok());
-        assert!(sniff(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").is_ok());
-        assert!(sniff(&[]).is_ok());
-    }
-
-    #[test]
-    fn cut_off_headers_are_refused_without_panic() {
-        let full = ftyp(b"heic", &[b"mif1", b"heic"]);
-        for len in 8..full.len() {
-            assert!(refused(&full[..len]), "cut at {len}");
+    fn hevc_brands_are_heic() {
+        for h in [
+            ftyp(b"heic", &[b"mif1", b"heic"]),
+            ftyp(b"heix", &[]),
+            ftyp(b"mif1", &[b"heic"]),
+            ftyp(b"msf1", &[b"hevc"]),
+            ftyp(b"abcd", &[b"heim"]),
+            ftyp(b"abcd", &[b"heis"]),
+            ftyp(b"abcd", &[b"hevx"]),
+        ] {
+            assert_eq!(heif_family(&h), Some(Format::Heic), "{h:?}");
         }
-        assert!(refused(b"\0\0\0\x18ftyp"));
-        assert!(refused(b"\0\0\0\x01ftypheic"));
-        // Shorter than a box header: not HEIF.
-        assert!(sniff(b"\0\0\0\x18fty").is_ok());
     }
 
     #[test]
-    fn odd_box_sizes_are_refused_without_panic() {
-        for size in [0u32, 1, 2, 7, 8, 9, 11, 15, 16, 17, u32::MAX] {
+    fn other_heif_brands_are_heif() {
+        for h in [
+            ftyp(b"mif1", &[]),
+            ftyp(b"msf1", &[b"mif1"]),
+            // Major brand unknown, HEIF only in the compatible list.
+            ftyp(b"abcd", &[b"mif2"]),
+        ] {
+            assert_eq!(heif_family(&h), Some(Format::Heif), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn avif_brands_win() {
+        assert_eq!(
+            heif_family(&ftyp(b"avif", &[b"mif1", b"miaf"])),
+            Some(Format::Avif)
+        );
+        assert_eq!(heif_family(&ftyp(b"mif1", &[b"avif"])), Some(Format::Avif));
+        assert_eq!(heif_family(&ftyp(b"avis", &[b"msf1"])), Some(Format::Avif));
+    }
+
+    #[test]
+    fn other_files_are_not_heif() {
+        assert_eq!(heif_family(&ftyp(b"isom", &[b"mp41"])), None);
+        assert_eq!(heif_family(&[0xff, 0xd8, 0xff, 0xe0]), None);
+        assert_eq!(heif_family(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"), None);
+        assert_eq!(heif_family(&[]), None);
+    }
+
+    #[test]
+    fn cut_off_or_odd_ftyp_is_not_heif_and_does_not_panic() {
+        let full = ftyp(b"heic", &[b"mif1", b"heic"]);
+        for len in 0..full.len() {
+            assert_eq!(heif_family(&full[..len]), None, "cut at {len}");
+        }
+        for size in [0u32, 1, 2, 7, 8, 9, 11, 15, 25, u32::MAX] {
             let mut v = ftyp(b"heic", &[b"mif1"]);
             v[0..4].copy_from_slice(&size.to_be_bytes());
-            assert!(refused(&v), "size {size}");
+            assert_eq!(heif_family(&v), None, "size {size}");
         }
-        for large_size in [0u64, 1, 8, 15, 16, 23, 24, 28, u64::MAX] {
-            let mut large = ftyp(b"heic", &[b"mif1"]);
-            large[0..4].copy_from_slice(&1u32.to_be_bytes());
-            large.splice(8..8, large_size.to_be_bytes());
-            assert!(refused(&large), "largesize {large_size}");
-        }
+        // Size not a multiple of four: the partial brand is ignored.
+        let mut v = ftyp(b"abcd", &[b"heic"]);
+        v.push(0);
+        v[3] = 21;
+        assert_eq!(heif_family(&v), Some(Format::Heic));
+        v[3] = 19;
+        assert_eq!(heif_family(&v), None);
     }
 }

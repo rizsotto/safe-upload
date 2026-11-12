@@ -183,6 +183,22 @@ for f in heic-gps.heic heic-rot90.heic; do
         "$f"
 done
 et -n -Orientation=6 heic-rot90.heic
+# heic-mirror: the same red top-left source, stored with an imir box (axis
+#     0) plus EXIF Orientation 2. heif-enc cannot write imir, so the 9 byte
+#     irot box from --rotate-cw is patched in place into a 9 byte imir box:
+#     nothing moves, no offset changes. libheif (heif-dec) shows it 640x480
+#     with red bottom-left; EXIF 2 applied as well would move red to the
+#     bottom-right, and an ignored imir leaves it top-left.
+heif-enc -e x265 -q 60 --rotate-cw 90 -o heic-mirror.heic heic-rot-src.png >/dev/null
+perl -0777 -pi -e '
+    my $n = () = /\0\0\0\x09irot/g;
+    die "heic-mirror.heic: $n irot boxes, want 1\n" unless $n == 1;
+    s/\0\0\0\x09irot./\0\0\0\x09imir\0/s;
+' heic-mirror.heic
+et -Make=FixtureCam -Model=FixtureModel \
+    -GPSLatitude=47.5 -GPSLatitudeRef=N -GPSLongitude=19.04 -GPSLongitudeRef=E \
+    heic-mirror.heic
+et -n -Orientation=2 heic-mirror.heic
 
 rm -f thumb-src.jpg makernote.bin png-src.png rgb-src.png p3-src.png \
     heic-src.png heic-rot-src.png

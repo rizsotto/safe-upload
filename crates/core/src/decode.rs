@@ -1,11 +1,11 @@
 //! Decodes untrusted files with glycin inside a sandbox (SPEC 9.1 step 1,
 //! S-4, NFR-2): bwrap on the host, `flatpak-spawn --sandbox` in a Flatpak.
 //!
-//! Before glycin sees a file we check its size, refuse HEIF (`sniff`),
-//! accept only JPEG, PNG, WebP and AVIF, and check that the file is not
-//! cut off: glycin fills in missing JPEG data without an error. After
-//! `load()` and before `next_frame()` we check the pixel count, because
-//! `next_frame()` allocates the full buffer.
+//! Before glycin sees a file we check its size, accept only JPEG, PNG,
+//! WebP, AVIF and HEIF, and check that the file is not cut off: glycin
+//! fills in missing JPEG data without an error. After `load()` and before
+//! `next_frame()` we check the pixel count, because `next_frame()`
+//! allocates the full buffer.
 
 use std::io::Read;
 use std::path::Path;
@@ -15,7 +15,7 @@ use glycin::{Loader, MainContextSelector, MemoryFormat, MemoryFormatSelection, S
 use image::RgbaImage;
 
 use crate::color::SourceColor;
-use crate::{Error, Limits, Orientation, sniff};
+use crate::{Error, Format, Limits, Orientation, sniff};
 
 /// A decoded image, before orientation and color conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,12 +51,14 @@ impl Decoder for GlycinDecoder {
 
 impl GlycinDecoder {
     pub fn decode_bytes(&self, bytes: Vec<u8>, limits: &Limits) -> Result<Decoded, Error> {
-        let mut image = open(bytes, limits)?;
+        let family = sniff::heif_family(&bytes);
+        let mut image = open(bytes, limits, family)?;
         let details = image.details();
         limits.check_dimensions(details.width(), details.height())?;
         let orientation = Orientation::from_exif(image.transformation_orientation() as u16);
 
-        let frame = block_on(image.next_frame()).map_err(|e| load_error(&e, "decoding failed"))?;
+        let frame =
+            block_on(image.next_frame()).map_err(|e| load_error(&e, "decoding failed", family))?;
         let (w, h) = (frame.width(), frame.height());
         // The pixel count was checked from the header, before the frame
         // was allocated.
@@ -106,7 +108,7 @@ fn sandbox_for(flatpak_info: &Path) -> SandboxMechanism {
 }
 
 /// Runs the checks before glycin, then `load()` in the sandbox.
-fn open(bytes: Vec<u8>, limits: &Limits) -> Result<glycin::Image, Error> {
+fn open(bytes: Vec<u8>, limits: &Limits, family: Option<Format>) -> Result<glycin::Image, Error> {
     sniff::sniff(&bytes)?;
     check_complete(&bytes)?;
     let sandbox = sandbox_for(Path::new(FLATPAK_INFO));
@@ -120,7 +122,8 @@ fn open(bytes: Vec<u8>, limits: &Limits) -> Result<glycin::Image, Error> {
         .color_convert_icc_srgb(false)
         .accepted_memory_formats(MemoryFormatSelection::R8g8b8a8)
         .limits(glycin::Limits::default().timeout(limits.decode_timeout));
-    let image = block_on(loader.load()).map_err(|e| load_error(&e, "cannot read the image"))?;
+    let image =
+        block_on(loader.load()).map_err(|e| load_error(&e, "cannot read the image", family))?;
     if image.active_sandbox_mechanism() != sandbox {
         return Err(Error::Sandbox("the decoder did not run in the sandbox"));
     }
@@ -134,16 +137,40 @@ fn open(bytes: Vec<u8>, limits: &Limits) -> Result<glycin::Image, Error> {
 /// failures, the loader dying early, D-Bus, seccomp, I/O) is a sandbox
 /// failure. glycin's error kind is private, so its remote errors are known
 /// by their `Display` prefix; `loader_errors_blame_the_file` guards that.
-fn load_error(e: &glycin::Error, bad_file: &'static str) -> Error {
-    if e.unsupported_format().is_some() {
-        Error::Decode("unknown or unsupported image format")
+///
+/// A HEIF or AVIF file (`family`) whose codec plugin or glycin loader is
+/// missing is [`Error::MissingDecoder`]. libheif reports a missing plugin
+/// only in the remote error text; the CLI test
+/// `heic_without_decoder_exits_3` guards the match.
+fn load_error(e: &glycin::Error, bad_file: &'static str, family: Option<Format>) -> Error {
+    let text = e.to_string();
+    if let Some(mime) = e.unsupported_format() {
+        unsupported(&mime, family)
     } else if e.is_timeout() {
         Error::Decode("decoding took too long")
-    } else if e.to_string().starts_with("Remote error:") {
+    } else if let Some(missing) = missing_decoder(&text, family) {
+        missing
+    } else if text.starts_with("Remote error:") {
         Error::Decode(bad_file)
     } else {
         Error::Sandbox("the decoder failed to start or stopped early")
     }
+}
+
+/// MIME types glycin gives HEIF family files. If no loader is set up for
+/// one of these, the glycin-heif loader is not installed.
+const HEIF_MIME_TYPES: &[&str] = &["image/heif", "image/heic", "image/avif"];
+
+fn unsupported(mime: &str, family: Option<Format>) -> Error {
+    match family.filter(|_| HEIF_MIME_TYPES.contains(&mime)) {
+        Some(f) => Error::MissingDecoder(f),
+        None => Error::Decode("unknown or unsupported image format"),
+    }
+}
+
+fn missing_decoder(text: &str, family: Option<Format>) -> Option<Error> {
+    let missing = text.starts_with("Remote error:") && text.contains("NoMatchingDecoderInstalled");
+    family.filter(|_| missing).map(Error::MissingDecoder)
 }
 
 /// Refuses formats we do not accept and files that are cut off.
@@ -155,7 +182,7 @@ fn check_complete(b: &[u8]) -> Result<(), Error> {
     } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
         let size = u32::from_le_bytes(b[4..8].try_into().unwrap());
         b.len() as u64 >= 8 + u64::from(size)
-    } else if is_avif(b) {
+    } else if sniff::heif_family(b).is_some() {
         isobmff_complete(b)
     } else {
         return Err(Error::Decode("unknown or unsupported image format"));
@@ -229,26 +256,6 @@ fn png_complete(b: &[u8]) -> bool {
     false
 }
 
-/// An `ftyp` box with an `avif` or `avis` brand. Other HEIF brands were
-/// refused by `sniff`.
-fn is_avif(b: &[u8]) -> bool {
-    if b.get(4..8) != Some(b"ftyp") {
-        return false;
-    }
-    let size = u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize;
-    let Some(ftyp) = b.get(8..size.min(b.len())) else {
-        return false;
-    };
-    // Major brand, minor version, then compatible brands.
-    let brands = ftyp
-        .get(..4)
-        .into_iter()
-        .chain(ftyp.get(8..).unwrap_or(&[]).chunks(4));
-    brands
-        .into_iter()
-        .any(|brand| brand == b"avif" || brand == b"avis")
-}
-
 /// Every top-level box must fit in the file.
 fn isobmff_complete(b: &[u8]) -> bool {
     let mut i = 0usize;
@@ -285,7 +292,7 @@ mod tests {
 
     #[test]
     fn core_decoder_runs_in_bwrap() {
-        let image = open(jpeg(), &Limits::default()).unwrap();
+        let image = open(jpeg(), &Limits::default(), None).unwrap();
         assert_eq!(image.active_sandbox_mechanism(), SandboxMechanism::Bwrap);
     }
 
@@ -302,9 +309,46 @@ mod tests {
     #[test]
     fn local_glycin_errors_are_sandbox_failures() {
         let io = glycin::Error::from(std::io::Error::other("spawn failed"));
-        assert!(matches!(load_error(&io, "x"), Error::Sandbox(_)));
+        assert!(matches!(load_error(&io, "x", None), Error::Sandbox(_)));
         let other = glycin::Error::other("loader exited early");
-        assert!(matches!(load_error(&other, "x"), Error::Sandbox(_)));
+        let heif = Some(Format::Heif);
+        assert!(matches!(load_error(&other, "x", heif), Error::Sandbox(_)));
+        // Local text that only mentions the plugin error is still local.
+        let local = glycin::Error::other("NoMatchingDecoderInstalled");
+        assert!(matches!(load_error(&local, "x", heif), Error::Sandbox(_)));
+    }
+
+    #[test]
+    fn missing_plugin_text_maps_to_missing_decoder() {
+        let text = "Remote error: Loader error: PluginLoadingError(NoMatchingDecoderInstalled)";
+        for f in [Format::Heic, Format::Heif, Format::Avif] {
+            assert!(matches!(
+                missing_decoder(text, Some(f)),
+                Some(Error::MissingDecoder(g)) if g == f
+            ));
+        }
+        // Not HEIF or AVIF: no guess about the format.
+        assert!(missing_decoder(text, None).is_none());
+        let other = "Remote error: Loader error: invalid input";
+        assert!(missing_decoder(other, Some(Format::Heif)).is_none());
+    }
+
+    #[test]
+    fn missing_heif_loader_maps_to_missing_decoder() {
+        assert!(matches!(
+            unsupported("image/heif", Some(Format::Heic)),
+            Error::MissingDecoder(Format::Heic)
+        ));
+        assert!(matches!(
+            unsupported("image/avif", Some(Format::Avif)),
+            Error::MissingDecoder(Format::Avif)
+        ));
+        // Brands say HEIF but glycin saw something else, or the reverse.
+        assert!(matches!(
+            unsupported("application/octet-stream", Some(Format::Heic)),
+            Error::Decode(_)
+        ));
+        assert!(matches!(unsupported("image/heif", None), Error::Decode(_)));
     }
 
     #[test]
@@ -357,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn webp_and_avif_size_checks() {
+    fn webp_avif_and_heif_size_checks() {
         let mut webp = b"RIFF\x0c\0\0\0WEBPVP8 ".to_vec();
         assert!(check_complete(&webp).is_err());
         webp.extend_from_slice(b"\0\0\0\0");
@@ -368,10 +412,17 @@ mod tests {
         assert!(check_complete(&avif).is_err());
         avif.extend_from_slice(&[0; 8]);
         assert!(check_complete(&avif).is_ok());
+
+        let mut heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
+        assert!(check_complete(&heic).is_ok());
+        heic.extend_from_slice(b"\0\0\0\x10mdat");
+        assert!(check_complete(&heic).is_err());
+        heic.extend_from_slice(&[0; 8]);
+        assert!(check_complete(&heic).is_ok());
     }
 
     #[test]
-    fn only_avif_brands_count_as_avif() {
+    fn only_heif_family_brands_pass() {
         let mut mp4 = b"\0\0\0\x14ftypmp42\0\0\0\0isom".to_vec();
         mp4.extend_from_slice(b"\0\0\0\x08free");
         assert!(matches!(check_complete(&mp4), Err(Error::Decode(_))));

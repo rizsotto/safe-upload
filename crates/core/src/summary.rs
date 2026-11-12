@@ -9,6 +9,8 @@
 use std::cell::Cell;
 use std::fmt;
 
+use crate::{Format, sniff};
+
 /// A kind of metadata found in the input and not in the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Removed {
@@ -232,10 +234,6 @@ fn uint(b: &[u8], i: usize, size: usize) -> Option<usize> {
     }
 }
 
-const HEIF_BRANDS: &[&[u8]] = &[
-    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"mif2", b"msf1",
-];
-
 /// At most this many `Exif` items are read. Real files have one.
 const MAX_EXIF_ITEMS: usize = 8;
 /// At most this many `iloc` extents are read, for all items together.
@@ -243,25 +241,10 @@ const MAX_EXTENTS: usize = 1000;
 /// An `Exif` item larger than this is reported, not read.
 const MAX_EXIF_BYTES: usize = 1 << 20;
 
-/// An `ftyp` box with a HEIF brand and no AVIF brand (AVIF is not scanned).
+/// A HEIF file that is not AVIF (AVIF is not scanned). Same brand rules
+/// as the decoder ([`sniff::heif_family`]).
 fn is_heif(b: &[u8]) -> bool {
-    let Some((b"ftyp", ftyp)) = boxes(b).next() else {
-        return false;
-    };
-    let brands: Vec<&[u8]> = ftyp
-        .get(..4)
-        .into_iter()
-        .chain(
-            ftyp.get(8..)
-                .unwrap_or(&[])
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| c.as_slice()),
-        )
-        .collect();
-    !brands.iter().any(|b| *b == b"avif" || *b == b"avis")
-        && brands.iter().any(|b| HEIF_BRANDS.contains(b))
+    matches!(sniff::heif_family(b), Some(Format::Heic | Format::Heif))
 }
 
 fn tick(steps: &Cell<usize>) {
