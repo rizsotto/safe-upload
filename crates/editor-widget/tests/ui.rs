@@ -373,6 +373,210 @@ fn pixelate_preview_changes_pixels_inside_only() {
     win.destroy();
 }
 
+fn shortcuts_map_each_trigger_to_its_action() {
+    let (win, ed) = editor((100, 100), (100, 100), None);
+    let controllers = ed.observe_controllers();
+    let mut found = Vec::new();
+    for i in 0..controllers.n_items() {
+        let Some(sc) = controllers
+            .item(i)
+            .and_downcast::<gtk::ShortcutController>()
+        else {
+            continue;
+        };
+        for j in 0..sc.n_items() {
+            let s = sc.item(j).and_downcast::<gtk::Shortcut>().unwrap();
+            let trigger = s.trigger().unwrap().to_str().to_string();
+            let action = s
+                .action()
+                .and_downcast::<gtk::NamedAction>()
+                .unwrap()
+                .action_name()
+                .to_string();
+            let arg = s.arguments().and_then(|v| v.get::<String>());
+            found.push((trigger, action, arg));
+        }
+    }
+    let want = [
+        ("b", "editor.tool", Some("box")),
+        ("p", "editor.tool", Some("pixelate")),
+        ("c", "editor.tool", Some("crop")),
+        ("<Control>z", "editor.undo", None),
+        ("<Control><Shift>z", "editor.redo", None),
+        ("<Control>y", "editor.redo", None),
+        ("Delete", "editor.delete", None),
+        ("BackSpace", "editor.delete", None),
+    ];
+    for (t, a, arg) in want {
+        let t = gtk::ShortcutTrigger::parse_string(t)
+            .unwrap()
+            .to_str()
+            .to_string();
+        let w = (t, a.to_string(), arg.map(str::to_string));
+        assert!(found.contains(&w), "{w:?} not in {found:?}");
+    }
+    // Each target action exists and does what it says.
+    ed.activate_action("editor.tool", Some(&"crop".to_variant()))
+        .unwrap();
+    assert_eq!(ed.tool(), Tool::Crop);
+    win.destroy();
+}
+
+fn keyboard_adds_moves_resizes_and_deletes() {
+    use gdk::Key;
+    use gdk::ModifierType as M;
+    let (win, ed) = editor((200, 100), (200, 100), None);
+    ed.canvas().grab_focus();
+    let step = (10.0 / ed.view().scale).round().max(1.0) as u32;
+    let rect = |ed: &RedactionEditor| areas(ed)[0].1;
+
+    assert!(ed.handle_key(Key::Return, M::empty()));
+    assert_eq!(areas(&ed), [(AreaKind::Box, Rect::new(50, 25, 100, 50))]);
+    assert_eq!(ed.model().unwrap().selected(), Some(0));
+
+    // A held arrow (several presses, one release) is one undo step.
+    for _ in 0..3 {
+        assert!(ed.handle_key(Key::Right, M::empty()));
+    }
+    ed.handle_key_release(Key::Right);
+    assert_eq!(rect(&ed), Rect::new(50 + 3 * step, 25, 100, 50));
+    assert!(ed.handle_key(Key::Up, M::ALT_MASK));
+    ed.handle_key_release(Key::Up);
+    assert_eq!(rect(&ed), Rect::new(50 + 3 * step, 24, 100, 50));
+    assert!(ed.handle_key(Key::Down, M::SHIFT_MASK));
+    ed.handle_key_release(Key::Down);
+    assert_eq!(rect(&ed), Rect::new(50 + 3 * step, 24, 100, 50 + step));
+    ed.activate_action("editor.undo", None).unwrap();
+    ed.activate_action("editor.undo", None).unwrap();
+    ed.activate_action("editor.undo", None).unwrap();
+    assert_eq!(areas(&ed)[0].1, Rect::new(50, 25, 100, 50));
+    ed.activate_action("editor.redo", None).unwrap();
+
+    // Select again with Tab, then Delete (the shortcut's action).
+    assert!(ed.handle_key(Key::Tab, M::empty()));
+    ed.activate_action("editor.delete", None).unwrap();
+    assert!(areas(&ed).is_empty());
+    ed.activate_action("editor.undo", None).unwrap();
+    assert_eq!(areas(&ed).len(), 1);
+
+    // Pixelate tool: Enter adds a pixelate area.
+    ed.activate_action("editor.tool", Some(&"pixelate".to_variant()))
+        .unwrap();
+    assert!(ed.handle_key(Key::KP_Enter, M::empty()));
+    assert_eq!(areas(&ed)[1].0, AreaKind::Pixelate);
+
+    // Crop: the same keys edit the crop.
+    ed.set_tool(Tool::Crop);
+    assert!(ed.handle_key(Key::Return, M::empty()));
+    assert_eq!(ed.model().unwrap().crop(), Some(Rect::new(50, 25, 100, 50)));
+    assert!(ed.handle_key(Key::Left, M::ALT_MASK));
+    assert!(ed.handle_key(Key::Left, M::SHIFT_MASK | M::ALT_MASK));
+    ed.handle_key_release(Key::Left);
+    assert_eq!(ed.model().unwrap().crop(), Some(Rect::new(49, 25, 99, 50)));
+    win.destroy();
+}
+
+fn tab_cycles_and_escape_leaves_the_canvas() {
+    use gdk::Key;
+    use gdk::ModifierType as M;
+    let mut m = EditModel::new(200, 100);
+    m.add(AreaKind::Box, Rect::new(10, 10, 20, 20));
+    m.add(AreaKind::Box, Rect::new(50, 10, 20, 20));
+    let (win, ed) = editor((200, 100), (200, 100), Some(m));
+    let canvas = ed.canvas();
+    canvas.grab_focus();
+    assert_eq!(
+        gtk::prelude::GtkWindowExt::focus(&win).as_ref(),
+        Some(&canvas)
+    );
+    let sel = |ed: &RedactionEditor| ed.model().unwrap().selected();
+    assert_eq!(sel(&ed), Some(1));
+    assert!(ed.handle_key(Key::Tab, M::empty()));
+    assert_eq!(sel(&ed), Some(0));
+    assert!(ed.handle_key(Key::ISO_Left_Tab, M::SHIFT_MASK));
+    assert_eq!(sel(&ed), Some(1));
+    assert!(ed.handle_key(Key::Escape, M::empty()));
+    assert_eq!(sel(&ed), None);
+    assert_eq!(
+        gtk::prelude::GtkWindowExt::focus(&win).as_ref(),
+        Some(&canvas)
+    );
+    assert!(ed.handle_key(Key::Escape, M::empty()));
+    let focus = gtk::prelude::GtkWindowExt::focus(&win).unwrap();
+    assert!(
+        focus.is_ancestor(&ed.toolbar()),
+        "focus left for the toolbar"
+    );
+
+    // With no areas, Tab is not used, so focus can move on.
+    ed.activate_action("editor.next-area", None).unwrap();
+    ed.activate_action("editor.delete", None).unwrap();
+    ed.activate_action("editor.next-area", None).unwrap();
+    ed.activate_action("editor.delete", None).unwrap();
+    assert!(areas(&ed).is_empty());
+    assert!(!ed.handle_key(Key::Tab, M::empty()));
+    assert!(!ed.handle_key(Key::Right, M::empty()));
+    win.destroy();
+}
+
+fn has_description(w: &gtk::Widget, text: &str) -> bool {
+    use gtk::glib::translate::ToGlibPtr;
+    let c = std::ffi::CString::new(text).unwrap();
+    let a: &gtk::Accessible = w.upcast_ref();
+    // SAFETY: a live accessible and a NUL-terminated string, as the
+    // description property expects; the result is freed with g_free.
+    unsafe {
+        let r = gtk::ffi::gtk_test_accessible_check_property(
+            a.to_glib_none().0,
+            gtk::ffi::GTK_ACCESSIBLE_PROPERTY_DESCRIPTION,
+            c.as_ptr(),
+        );
+        if r.is_null() {
+            true
+        } else {
+            gtk::glib::ffi::g_free(r.cast());
+            false
+        }
+    }
+}
+
+fn description_follows_the_edits() {
+    let (win, ed) = editor((1000, 800), (250, 200), None);
+    let canvas = ed.canvas();
+    assert_eq!(ed.description(), "No areas.");
+    assert!(has_description(&canvas, "No areas."));
+    assert!(!has_description(&canvas, "1 area: 1 box."));
+    ed.activate_action("editor.new-area", None).unwrap();
+    let want = "1 area: 1 box. Selected: box 1, 500 by 400 pixels at 250, 200.";
+    assert_eq!(ed.description(), want);
+    assert!(has_description(&canvas, want));
+    ed.activate_action("editor.move-by", Some(&(10, -20).to_variant()))
+        .unwrap();
+    let want = "1 area: 1 box. Selected: box 1, 500 by 400 pixels at 260, 180.";
+    assert!(has_description(&canvas, want), "{}", ed.description());
+    ed.activate_action("editor.commit", None).unwrap();
+    assert!(has_description(&canvas, "1 area: 1 box."));
+    win.destroy();
+}
+
+fn warning_shows_only_for_pixelate() {
+    let (win, ed) = editor((200, 100), (200, 100), None);
+    assert!(!ed.warning_visible());
+    ed.set_tool(Tool::Pixelate);
+    assert!(ed.warning_visible());
+    ed.activate_action("editor.new-area", None).unwrap();
+    ed.set_tool(Tool::Box);
+    // A selected pixelate area keeps the warning up.
+    assert!(ed.warning_visible());
+    ed.activate_action("editor.commit", None).unwrap();
+    assert!(!ed.warning_visible());
+    ed.activate_action("editor.new-area", None).unwrap();
+    assert!(!ed.warning_visible());
+    ed.set_tool(Tool::Crop);
+    assert!(!ed.warning_visible());
+    win.destroy();
+}
+
 fn main() -> ExitCode {
     let env = headless::Headless::start();
     env.watchdog(WATCHDOG);
@@ -409,6 +613,26 @@ fn main() -> ExitCode {
         (
             "pixelate_preview_changes_pixels_inside_only",
             pixelate_preview_changes_pixels_inside_only,
+        ),
+        (
+            "shortcuts_map_each_trigger_to_its_action",
+            shortcuts_map_each_trigger_to_its_action,
+        ),
+        (
+            "keyboard_adds_moves_resizes_and_deletes",
+            keyboard_adds_moves_resizes_and_deletes,
+        ),
+        (
+            "tab_cycles_and_escape_leaves_the_canvas",
+            tab_cycles_and_escape_leaves_the_canvas,
+        ),
+        (
+            "description_follows_the_edits",
+            description_follows_the_edits,
+        ),
+        (
+            "warning_shows_only_for_pixelate",
+            warning_shows_only_for_pixelate,
         ),
     ]);
     drop(env);

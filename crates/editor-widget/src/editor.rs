@@ -11,8 +11,10 @@ use gtk::{gdk, glib, graphene, gsk};
 use image::RgbaImage;
 use safe_upload_core::edit::{Rect, Redaction};
 
+use crate::a11y;
 use crate::canvas::Canvas;
-use crate::model::{Area, EditModel, Tool};
+use crate::keys::{self, KeyContext};
+use crate::model::{Area, AreaKind, EditModel, Tool};
 use crate::preview;
 use crate::view::ViewTransform;
 
@@ -77,6 +79,10 @@ mod imp {
         pub(super) drag: Cell<Option<Drag>>,
         pub(super) toolbar: RefCell<Option<gtk::Box>>,
         pub(super) canvas: RefCell<Option<Canvas>>,
+        pub(super) warning: RefCell<Option<gtk::Label>>,
+        /// An arrow key is held: its moves are one undo step.
+        pub(super) key_held: Cell<bool>,
+        pub(super) description: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -92,6 +98,22 @@ mod imp {
             klass.install_action("editor.undo", None, |ed, _, _| ed.undo());
             klass.install_action("editor.redo", None, |ed, _, _| ed.redo());
             klass.install_action("editor.delete", None, |ed, _, _| ed.delete_target());
+            klass.install_action("editor.new-area", None, |ed, _, _| ed.new_area());
+            klass.install_action("editor.commit", None, |ed, _, _| ed.commit());
+            klass.install_action("editor.cancel", None, |ed, _, _| ed.cancel());
+            klass.install_action("editor.next-area", None, |ed, _, _| ed.cycle(true));
+            klass.install_action("editor.previous-area", None, |ed, _, _| ed.cycle(false));
+            let pair = glib::VariantTy::new("(ii)").expect("valid type");
+            klass.install_action("editor.move-by", Some(pair), |ed, _, v| {
+                if let Some((dx, dy)) = v.and_then(|v| v.get::<(i32, i32)>()) {
+                    ed.move_target(dx, dy, false);
+                }
+            });
+            klass.install_action("editor.resize-by", Some(pair), |ed, _, v| {
+                if let Some((dx, dy)) = v.and_then(|v| v.get::<(i32, i32)>()) {
+                    ed.move_target(dx, dy, true);
+                }
+            });
         }
     }
 
@@ -136,10 +158,58 @@ mod imp {
                 layout.set_orientation(gtk::Orientation::Vertical);
                 layout.set_spacing(6);
             }
-            let toolbar = super::build_toolbar();
+            let warning = gtk::Label::new(Some(a11y::WARNING));
+            warning.add_css_class("warning");
+            warning.set_wrap(true);
+            warning.set_xalign(0.0);
+            let toolbar = super::build_toolbar(&warning);
             toolbar.set_parent(&*obj);
+            warning.set_parent(&*obj);
             let canvas = Canvas::new();
             canvas.set_parent(&*obj);
+
+            let shortcuts = gtk::ShortcutController::new();
+            shortcuts.set_scope(gtk::ShortcutScope::Local);
+            for &(trigger, action, arg) in keys::SHORTCUTS {
+                let trigger = gtk::ShortcutTrigger::parse_string(trigger);
+                let action = gtk::NamedAction::new(action);
+                let shortcut = match arg {
+                    Some(a) => {
+                        gtk::Shortcut::with_arguments(trigger, Some(action), &a.to_variant())
+                    }
+                    None => gtk::Shortcut::new(trigger, Some(action)),
+                };
+                shortcuts.add_shortcut(shortcut);
+            }
+            obj.add_controller(shortcuts);
+
+            let key = gtk::EventControllerKey::new();
+            key.connect_key_pressed(glib::clone!(
+                #[weak]
+                obj,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, k, _, mods| {
+                    if obj.handle_key(k, mods) {
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
+                }
+            ));
+            key.connect_key_released(glib::clone!(
+                #[weak]
+                obj,
+                move |_, k, _, _| obj.handle_key_release(k)
+            ));
+            canvas.add_controller(key);
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_leave(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.end_key_gesture()
+            ));
+            canvas.add_controller(focus);
 
             let drag = gtk::GestureDrag::new();
             drag.connect_drag_begin(glib::clone!(
@@ -166,6 +236,7 @@ mod imp {
 
             self.toolbar.replace(Some(toolbar));
             self.canvas.replace(Some(canvas));
+            self.warning.replace(Some(warning));
             obj.update_state();
         }
 
@@ -211,33 +282,41 @@ fn action_button(label: &str, action: &str, tooltip: &str) -> gtk::Button {
     b
 }
 
-fn build_toolbar() -> gtk::Box {
+fn build_toolbar(warning: &gtk::Label) -> gtk::Box {
     let tools = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     tools.add_css_class("linked");
     tools.append(&tool_button(
         "Box",
         Tool::Box,
-        "Cover with a solid black box. Safe for text.",
+        "Cover with a solid black box. Safe for text. (B)",
     ));
-    tools.append(&tool_button(
+    let pixelate = tool_button(
         "Pixelate",
         Tool::Pixelate,
-        "Pixelate an area. Not safe for text.",
-    ));
-    tools.append(&tool_button("Crop", Tool::Crop, "Crop the image"));
+        "Pixelate an area. Not safe for text. (P)",
+    );
+    pixelate.update_relation(&[gtk::accessible::Relation::DescribedBy(&[
+        warning.upcast_ref()
+    ])]);
+    tools.append(&pixelate);
+    tools.append(&tool_button("Crop", Tool::Crop, "Crop the image (C)"));
 
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.append(&tools);
-    bar.append(&action_button("Undo", "editor.undo", "Undo the last edit"));
+    bar.append(&action_button(
+        "Undo",
+        "editor.undo",
+        "Undo the last edit (Ctrl+Z)",
+    ));
     bar.append(&action_button(
         "Redo",
         "editor.redo",
-        "Redo the last undone edit",
+        "Redo the last undone edit (Ctrl+Shift+Z)",
     ));
     bar.append(&action_button(
         "Delete",
         "editor.delete",
-        "Delete the selected area, or the crop with the Crop tool",
+        "Delete the selected area, or the crop with the Crop tool (Delete)",
     ));
     bar
 }
@@ -475,6 +554,114 @@ impl RedactionEditor {
         });
     }
 
+    /// A key press on the canvas. The canvas key controller calls this;
+    /// public so tests can drive it. Returns true if the key was used.
+    pub fn handle_key(&self, key: gdk::Key, mods: gdk::ModifierType) -> bool {
+        let scale = self.view().scale;
+        let Some(ctx) = self.with_model(|m| KeyContext {
+            scale,
+            has_target: self.target(m).is_some(),
+            has_areas: self.tool() != Tool::Crop && !m.areas().is_empty(),
+        }) else {
+            return false;
+        };
+        let Some(cmd) = keys::command(key, mods, ctx) else {
+            return false;
+        };
+        if cmd.held && !self.imp().key_held.replace(true) {
+            self.edit(|m| m.begin_gesture());
+        }
+        self.activate_action(cmd.action, cmd.arg.as_ref()).is_ok()
+    }
+
+    /// A key release on the canvas: releasing an arrow ends its undo step.
+    pub fn handle_key_release(&self, key: gdk::Key) {
+        if keys::is_arrow(key) {
+            self.end_key_gesture();
+        }
+    }
+
+    fn end_key_gesture(&self) {
+        if self.imp().key_held.replace(false) {
+            self.edit(|m| m.end_gesture());
+        }
+    }
+
+    /// The canvas's accessible description, kept up to date.
+    pub fn description(&self) -> String {
+        self.imp().description.borrow().clone()
+    }
+
+    /// Whether the "not safe for text" warning is shown.
+    pub fn warning_visible(&self) -> bool {
+        self.imp()
+            .warning
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.is_visible())
+    }
+
+    /// Adds an area of the current tool (or sets the crop) in the middle,
+    /// half the width and height of the image.
+    fn new_area(&self) {
+        let tool = self.tool();
+        self.edit(|m| {
+            let (w, h) = m.size();
+            let r = Rect::new(w / 4, h / 4, (w / 2).max(1), (h / 2).max(1));
+            match tool.area_kind() {
+                Some(kind) => {
+                    m.add(kind, r);
+                }
+                None => m.set_crop(Some(r)),
+            }
+        });
+    }
+
+    /// Done with the selected area: ends its undo step and deselects.
+    fn commit(&self) {
+        self.end_key_gesture();
+        self.edit(|m| m.select(None));
+    }
+
+    /// Escape: deselects, or with nothing selected, leaves the canvas for
+    /// the toolbar.
+    fn cancel(&self) {
+        self.end_key_gesture();
+        if self.with_model(|m| m.selected().is_some()) == Some(true) {
+            self.edit(|m| m.select(None));
+        } else {
+            self.toolbar().child_focus(gtk::DirectionType::TabForward);
+        }
+    }
+
+    fn cycle(&self, forward: bool) {
+        self.end_key_gesture();
+        self.edit(|m| {
+            let n = m.areas().len();
+            if n == 0 {
+                return;
+            }
+            let next = match (m.selected(), forward) {
+                (None, true) => 0,
+                (None, false) => n - 1,
+                (Some(i), true) => (i + 1) % n,
+                (Some(i), false) => (i + n - 1) % n,
+            };
+            m.select(Some(next));
+        });
+    }
+
+    fn move_target(&self, dx: i32, dy: i32, resize: bool) {
+        let target = self.with_model(|m| self.target(m)).flatten();
+        self.edit(|m| match (target, resize) {
+            (Some(Target::Area(i)), false) => m.move_by(i, dx, dy),
+            (Some(Target::Area(i)), true) => m.resize_by(i, dx, dy),
+            (Some(Target::Crop), false) => m.move_crop_by(dx, dy),
+            (Some(Target::Crop), true) => m.resize_crop_by(dx, dy),
+            (None, _) => {}
+        });
+    }
+
     fn drag_cancel(&self) {
         if self.imp().drag.take().is_some() {
             self.edit(|m| m.end_gesture());
@@ -601,6 +788,25 @@ impl RedactionEditor {
         self.action_set_enabled("editor.undo", can_undo);
         self.action_set_enabled("editor.redo", can_redo);
         self.action_set_enabled("editor.delete", can_delete);
+        let tool = self.tool();
+        let (warn, text) = self
+            .with_model(|m| {
+                let selected = m.selected().map(|i| m.areas()[i].kind);
+                let warn = tool == Tool::Pixelate
+                    || (tool != Tool::Crop && selected == Some(AreaKind::Pixelate));
+                (warn, a11y::describe(m))
+            })
+            .unwrap_or_else(|| (tool == Tool::Pixelate, "No image.".to_string()));
+        let imp = self.imp();
+        if let Some(w) = imp.warning.borrow().as_ref() {
+            w.set_visible(warn);
+        }
+        if *imp.description.borrow() != text {
+            if let Some(c) = imp.canvas.borrow().as_ref() {
+                c.update_property(&[gtk::accessible::Property::Description(&text)]);
+            }
+            imp.description.replace(text);
+        }
         if let Some(c) = self.imp().canvas.borrow().as_ref() {
             c.queue_draw();
         }

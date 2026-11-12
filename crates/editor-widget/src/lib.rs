@@ -1,7 +1,9 @@
 //! Reusable GTK4 redaction editor widget.
 
+pub mod a11y;
 mod canvas;
 pub mod editor;
+pub mod keys;
 pub mod model;
 pub mod preview;
 pub mod view;
