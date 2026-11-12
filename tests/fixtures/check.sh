@@ -83,6 +83,15 @@ avif_info() { avifdec --info "$1" 2>/dev/null | sed -n "s/^ \* $2 *: //p"; }
 p3=$(avif_info p3-nclx.avif 'Color Primaries')/$(avif_info p3-nclx.avif 'Transfer Char.')/$(avif_info p3-nclx.avif 'Matrix Coeffs.')
 [ "$p3" = 12/13/0 ] || bad "p3-nclx.avif: CICP is $p3, not 12/13/0"
 [ "$(avif_info p3-nclx.avif 'ICC Profile')" = Absent ] || bad "p3-nclx.avif: has an ICC profile"
+for f in heic-gps.heic heic-rot90.heic; do
+    [ "$(head -c 12 "$f" | tail -c 8)" = ftypheic ] || bad "$f: no ftypheic at byte 4"
+    has "$f" GPS:GPSLatitude GPS:GPSLongitude IFD0:Make IFD0:Model
+done
+heif_size() { heif-info "$1" 2>/dev/null | sed -n 's/^image: \([0-9]*x[0-9]*\).*/\1/p' | head -n 1; }
+[ "$(heif_size heic-gps.heic)" = 640x480 ] || bad "heic-gps.heic: heif-info size is not 640x480"
+[ "$(heif_size heic-rot90.heic)" = 480x640 ] || bad "heic-rot90.heic: heif-info size is not 480x640"
+[ "$(exiftool -s3 -Rotation heic-rot90.heic)" = "Rotate 90 CW" ] || bad "heic-rot90.heic: no irot Rotation 90 CW"
+[ "$(exiftool -n -s3 -EXIF:Orientation heic-rot90.heic)" = 6 ] || bad "heic-rot90.heic: EXIF orientation is not 6"
 [ -f .safe-upload-fixtures ] || bad "no .safe-upload-fixtures marker"
 
 [ "$fail" = 0 ] && echo "fixtures: all checks passed"
