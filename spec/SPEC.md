@@ -96,7 +96,7 @@ There is precedent for this design. Android's system Photo Picker removes locati
 ### Functional
 - **FR-1** Remove EXIF, XMP, IPTC, MakerNotes, GPS, embedded thumbnails, PNG text chunks (`tEXt`, `iTXt`, `zTXt`), PNG `eXIf`, and HEIC metadata items.
 - **FR-2** Apply the EXIF orientation to the pixels **before** removing metadata, so the image does not end up sideways.
-- **FR-3** Fit-to-size: the output file must be ≤ the target size. It should be ≥ 85% of the target when that is possible (so quality is not thrown away for nothing).
+- **FR-3** Fit-to-size: the output file must be ≤ the target size. It should be ≥ 80% of the target when that is possible (so quality is not thrown away for nothing).
 - **FR-4** If the target cannot be met at the minimum quality and minimum size (see 9.3), fail with a clear message. Never return a file above the target.
 - **FR-5** Redactions are burned into the pixels before encoding. The output has no layers and no undo history.
 - **FR-6** The output name is `image.jpg`, or `image-1.jpg`, `image-2.jpg` and so on for a batch. A setting can keep original names.
@@ -283,7 +283,7 @@ at_scale(q):                                    # at most 8 full encodes
     lowest that does not, stopping at the first output >= 0.8 * target
     return the best output that fits, or none
 ```
-The search never returns a file above the target. It stops at 80% of the target or more (FR-3 asks for 85% when possible; decision 0002 trades that for fewer encodes). Most photos need one full encode, a few need two; at one scale it never needs more than 8 (decision 0002 has the data).
+The search never returns a file above the target. It stops at 80% of the target or more. Most photos need one full encode, a few need two; at one scale it never needs more than 8 (decision 0002 has the data).
 - PNG input with transparency → output PNG. Fit by quantizing (`imagequant`) and then scaling. If that fails, tell the user, or offer WebP if they allow it.
 - PNG input without transparency → JPEG by default (much smaller for photos).
 - Cache encodes so the UI preview does not encode twice.
