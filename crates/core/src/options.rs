@@ -3,7 +3,8 @@ use crate::edit::{Rect, Redaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
-    /// PNG with real transparency stays PNG. Everything else becomes JPEG.
+    /// Any input with real transparency becomes PNG. Everything else
+    /// becomes JPEG.
     #[default]
     Auto,
     Jpeg,

@@ -155,6 +155,12 @@ fn leaky_encoder_fails_closed_and_leaves_no_file() {
     let dir = private_dir("leaky");
     let input = fixtures().join("exif-gps-thumb.jpg");
     let original = common::fixture("exif-gps-thumb.jpg");
+    // An old mtime on the folder shows if a file was created and deleted.
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::open(dir.path())
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let err = prepare_with(
         &input,
         &Options::new(1_000_000),
@@ -166,6 +172,8 @@ fn leaky_encoder_fails_closed_and_leaves_no_file() {
     .unwrap_err();
     assert!(matches!(err, Error::Verify(_)), "{err}");
     assert!(files_in(dir.path()).is_empty());
+    let mtime = fs::metadata(dir.path()).unwrap().modified().unwrap();
+    assert_eq!(mtime, old, "the leaky bytes were never written");
     assert_eq!(fs::read(&input).unwrap(), original);
 }
 

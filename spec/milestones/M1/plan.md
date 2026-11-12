@@ -68,8 +68,8 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
 - **CLI output.** Core always writes to the private temp dir and verifies
   there. The CLI then copies to `-o`. Without `-o`, it prints the temp path.
   `--max-size` is required in M1, so SPEC 16.3 does not block M1.
-- **Format.** Auto: PNG with real alpha stays PNG. Everything else becomes
-  JPEG. WebP output is not in M1 acceptance; add it only if time allows.
+- **Format.** Auto: any input with real alpha becomes PNG (SPEC 4, 9.3).
+  Everything else becomes JPEG. WebP output is not in M1 acceptance; add it only if time allows.
 - **Verify in Rust, not exiftool.** `verify` walks JPEG markers and PNG
   chunks with an allow list (JPEG: SOI, DQT, SOF, DHT, SOS, DRI, EOI, APP0
   JFIF, APP2 ICC; PNG: IHDR, PLTE, tRNS, IDAT, IEND, iCCP, sRGB, gAMA, cHRM).

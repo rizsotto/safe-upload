@@ -45,7 +45,8 @@ impl PrivateDir {
         &self.path
     }
 
-    /// Writes a new file with mode 0600. Fails if the file exists.
+    /// Writes a new file with mode 0600. Fails if the file exists. If
+    /// writing fails, the partly written file is removed.
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, Error> {
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad output file name").into());
@@ -56,9 +57,14 @@ impl PrivateDir {
             .create_new(true)
             .mode(0o600)
             .open(&path)?;
-        file.set_permissions(Permissions::from_mode(0o600))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        let written = file
+            .set_permissions(Permissions::from_mode(0o600))
+            .and_then(|()| file.write_all(bytes))
+            .and_then(|()| file.sync_all());
+        if let Err(e) = written {
+            let _ = fs::remove_file(&path);
+            return Err(e.into());
+        }
         Ok(path)
     }
 

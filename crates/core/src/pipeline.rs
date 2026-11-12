@@ -53,9 +53,10 @@ pub fn default_encoder(format: OutputFormat) -> Result<Box<dyn Encoder + Sync>, 
     match format {
         OutputFormat::Jpeg => Ok(Box::new(JpegEncoder)),
         OutputFormat::Png => Ok(Box::new(PngEncoder)),
-        OutputFormat::Webp | OutputFormat::Auto => Err(Error::Encode(
+        OutputFormat::Webp => Err(Error::Encode(
             "WebP output is not supported in this version",
         )),
+        OutputFormat::Auto => Err(Error::Encode("no output format was chosen")),
     }
 }
 
@@ -85,12 +86,15 @@ pub fn prepare_with(
     let format = choose_format(opts.format, px.has_alpha);
     let encoder = encoder_for(format)?;
     let fitted = fit::fit(&px, opts.target_bytes, opts.max_long_edge, encoder.as_ref())?;
+    // Leaky bytes are never written, not even for a moment.
+    verify::verify(&fitted.bytes, OUTPUT_PROFILE.map(OutputProfile::bytes))?;
     // 7. Write to the private folder with a neutral name.
     let name = output_name(input, opts, target, encoder.extension());
     let path = target.dir.write(&name, &fitted.bytes)?;
-    // 8. Read back and verify. Fail closed (S-6).
+    // 8. Read back and verify. Fail closed (S-6): the verify error wins
+    // even if the file cannot be removed.
     if let Err(e) = verify_file(&path) {
-        std::fs::remove_file(&path)?;
+        let _ = std::fs::remove_file(&path);
         return Err(e);
     }
     Ok(Prepared {
