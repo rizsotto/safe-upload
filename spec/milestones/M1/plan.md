@@ -14,7 +14,7 @@ Status: draft. Review before tasks start.
 | Module | Job | SPEC |
 |---|---|---|
 | `options` | `Options`, `OutputFormat`, size parsing (`2MB`) | FR-3 |
-| `limits` | Max 200 MP, max file size, decode timeout | S-4 |
+| `limits` | Max 200 MP, max file size 200 MB, decode timeout 30 s (T03 defaults, not from SPEC; change if needed) | S-4 |
 | `sniff` | Detect HEIC/HEIF by content and refuse it, before decode | UC-4, S-6, decision 0001 |
 | `decode` | Untrusted file to `Decoded` | 9.1.1, NFR-2 |
 | `orient` | Apply EXIF orientation 1 to 8 to pixels | FR-2 |
@@ -73,6 +73,17 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
 - **Verify in Rust, not exiftool.** `verify` walks JPEG markers and PNG
   chunks with an allow list (JPEG: SOI, DQT, SOF, DHT, SOS, DRI, EOI, APP0
   JFIF, APP2 ICC; PNG: IHDR, PLTE, tRNS, IDAT, IEND, iCCP, sRGB, gAMA, cHRM).
+  `verify(bytes, expected_icc)`: an ICC profile must equal `expected_icc`
+  byte for byte (our minimal sRGB profile, SPEC 9.1.5) or be absent. JPEG
+  ICC chunks must come before SOF and join by sequence number; PNG iCCP
+  must come before PLTE and IDAT. DQT, DHT, SOF, SOS and DRI must have no
+  padding. PNG chunks have exact sizes, a fixed order and a checked CRC.
+  JFIF, DRI, each quantization table id and every PNG chunk except IDAT
+  appear at most once; SOS before SOF fails. The PNG iCCP name must be
+  `verify::ICC_PROFILE_NAME` (`icc`); the T09 PNG encoder must write it.
+  Not checked: the entropy-coded JPEG data and the IDAT content are not
+  decoded, so data hidden inside them would pass. They come from our own
+  encoder, which only gets pixels (SPEC 8).
   exiftool is used only in tests.
 - **HEIC/HEIF is refused in M1** (decision 0001). `sniff` reads the first
   box of the file, never the name. It is HEIF if bytes 4..8 are `ftyp`. Then
@@ -100,10 +111,35 @@ GPL-3.0-or-later.
 
 ## Facts from SPEC section 15 that M1 relies on
 
-- [ ] glycin exposes the ICC profile and orientation. This picks the decoder.
-  If it fails, use `image` + `libheif-rs` and run them in a sandbox or accept
-  memory-safe decoders only (NFR-2). If neither path works, open a decision
-  record. HEIC decode is not needed in M1 (decision 0001).
+- [x] glycin exposes the ICC profile and orientation. This picks the decoder:
+  glycin (crate 4.0.5). Checked in T05, see SPEC 15. HEIC decode is not
+  needed in M1 (decision 0001).
+
+### T05 findings (glycin spike)
+
+- The `glycin` crate needs glib, gio, fontconfig and libseccomp (C) and
+  talks to its loader processes with zbus in peer-to-peer mode over a
+  socket pair. No session or system bus is used, so core still has no
+  D-Bus service dependency and tests run without `dbus-daemon`. No GTK
+  (`gdk4` is an optional feature we do not enable). No network crates.
+- ICC: `color_convert_icc_srgb(false)` keeps the profile for our own
+  conversion (T08). With `true` (the default) glycin converts to sRGB
+  inside the sandbox; T08 may use that instead of lcms2.
+- Orientation: `transformation_orientation()` returns gufo-common's
+  `Orientation`, whose values are the EXIF numbers (glycin does not
+  re-export the type). `apply_transformations(true)` applies it.
+- Sandbox: core must use `SandboxSelector::Bwrap`, never `Auto`. Under a
+  Docker-like seccomp profile `Auto` printed "Glycin running without
+  sandbox" and decoded anyway; `Bwrap` failed with "Loader process exited
+  early". `Image::active_sandbox_mechanism()` reports what ran.
+- T06 must handle these itself, glycin does not:
+  - `truncated.jpg` decodes without an error (the missing part is filled
+    in). T06 needs its own check, for example a missing JPEG EOI.
+  - `huge-dims.jpg` (header says 20000x20000) passes `load()` and
+    `next_frame()` allocates the full buffer. Check `details()` width and
+    height against `Limits` after `load()` and before `next_frame()`.
+    glycin's own `Limits` are per side (default 65535 x 65535) with a 60 s
+    timeout.
 
 No other section 15 item is needed for M1. They are all portal or GTK facts.
 
@@ -112,11 +148,14 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 - HEIC: stock Fedora has no HEVC decoder or encoder. Settled by decision
   0001: M1 refuses HEIC, M2 adds decoding with RPM Fusion in dev and CI.
 - glycin's bwrap works in our rootless podman devcontainer with the current
-  `runArgs` (decision 0001, section 4). It may be blocked on GitHub runners.
-  With the `Auto` selector glycin then silently decodes without a sandbox.
-  This affects JPEG and PNG in M1 too. T05 records what happens on the CI
-  runner. CI must not pass with the sandbox silently off. If T05 cannot fix
-  this, stop and open a decision record (see SPEC 12, M2 open items).
+  `runArgs` (decision 0001, section 4, confirmed in T05). It may be blocked
+  on GitHub runners. The T05 test forces `SandboxSelector::Bwrap`, and T06
+  must do the same in the core decoder, so CI fails rather than passing
+  with the sandbox off. The CI job runs its container
+  with `seccomp=unconfined` and `apparmor=unconfined` and sets
+  `kernel.apparmor_restrict_unprivileged_userns=0` on the runner. Not yet
+  seen on a GitHub runner: check the first CI run. If bwrap still fails
+  there, open a decision record (see SPEC 12, M2 open items).
 
 ## Test strategy
 
@@ -148,7 +187,11 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 The devcontainer starts minimal (Rust only). Add these Fedora packages to
 `.devcontainer/Containerfile` in the task that first needs them:
 
-`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glycin-devel glycin-loaders bubblewrap perl-Image-ExifTool ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glib2-devel fontconfig-devel pkgconf-pkg-config glycin-loaders bubblewrap perl-Image-ExifTool perl-IO-Compress ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+
+(T05: the `glycin` crate needs `glib2-devel` and `fontconfig-devel`, not
+`glycin-devel`, which is the C library. T02: exiftool needs
+`perl-IO-Compress` to write `zTXt`.)
 
 `libheif-tools`, `libheif-ffmpeg` and RPM Fusion's `libheif-freeworld` are
 for HEIC only. They wait for M2 (decision 0001).

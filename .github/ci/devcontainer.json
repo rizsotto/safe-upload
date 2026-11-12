@@ -4,5 +4,11 @@
     "dockerfile": "../../.devcontainer/Containerfile",
     "context": "../../.devcontainer"
   },
+  "runArgs": [
+    "--security-opt",
+    "seccomp=unconfined",
+    "--security-opt",
+    "apparmor=unconfined"
+  ],
   "remoteUser": "dev"
 }
