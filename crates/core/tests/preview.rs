@@ -152,24 +152,43 @@ fn decode_timeout_fails_closed() {
 }
 
 #[test]
-fn heif_is_refused_before_the_decoder_runs() {
-    struct Panics;
-    impl Decoder for Panics {
-        fn decode(&self, _: &Path, _: &Limits) -> Result<Decoded, Error> {
-            panic!("the decoder must not see a HEIF file");
-        }
-    }
-    let err = preview_with(
+fn heic_preview_is_upright() {
+    let p = preview_of("heic-rot90.heic", 2048);
+    assert_eq!(p.full_size, (480, 640));
+    assert_eq!(p.pixels.dimensions(), (480, 640));
+    // Red quadrant top-right: irot applied once.
+    assert!(near(p.pixels.get_pixel(360, 160).0, [255, 0, 0], 60));
+    assert!(near(p.pixels.get_pixel(120, 160).0, [0, 0, 255], 60));
+    assert!(near(p.pixels.get_pixel(360, 480).0, [0, 0, 255], 60));
+}
+
+#[test]
+fn header_only_heif_preview_is_a_decode_error() {
+    let err = preview(
         &fixtures().join("heif-header.heic"),
         &Limits::default(),
         2048,
-        &Panics,
     )
     .unwrap_err();
-    assert!(
-        matches!(err, Error::UnsupportedFormat(Format::Heif)),
-        "{err}"
-    );
+    assert!(matches!(err, Error::Decode(_)), "{err}");
+}
+
+#[test]
+fn missing_decoder_is_passed_on() {
+    struct NoCodec;
+    impl Decoder for NoCodec {
+        fn decode(&self, _: &Path, _: &Limits) -> Result<Decoded, Error> {
+            Err(Error::MissingDecoder(Format::Heif))
+        }
+    }
+    let err = preview_with(
+        &fixtures().join("heic-gps.heic"),
+        &Limits::default(),
+        2048,
+        &NoCodec,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::MissingDecoder(Format::Heif)), "{err}");
 }
 
 const CHILD: &str = "SAFE_UPLOAD_PREVIEW_CHILD";
