@@ -19,7 +19,7 @@ Status: draft. Review before tasks start.
 | `decode` | Untrusted file to `Decoded` | 9.1.1, NFR-2 |
 | `orient` | Apply EXIF orientation 1 to 8 to pixels | FR-2 |
 | `edit` | Crop, box, pixelate (blur waits on SPEC 16.4) | FR-5, 9.4 |
-| `color` | ICC to sRGB, then drop the profile | 9.1.5, 9.2 |
+| `color` | ICC or CICP to sRGB with moxcms, then drop the profile | 9.1.5, 9.2 |
 | `encode` | `Encoder` trait. JPEG (mozjpeg), PNG (with imagequant) | 8 |
 | `fit` | Fit-to-size search, generic over `Encoder` | 9.3, FR-3, FR-4 |
 | `output` | Private temp dir, neutral names, old dir cleanup | S-1, S-2, FR-6, FR-7 |
@@ -93,6 +93,12 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
   Fedora decodes). A file cut off after the `ftyp` box is still refused. The
   check runs before glycin sees the file, so the result is the same on hosts
   that have an HEVC decoder. Error: `Error::UnsupportedFormat(Format::Heif)`.
+- **Decode input formats.** `decode` accepts only JPEG, PNG, WebP and
+  AVIF (SPEC 4), detected by content (AVIF needs an `avif` or `avis`
+  brand in `ftyp`). Anything else (GIF, SVG, TIFF...)
+  gives `Error::Decode` before glycin sees it. Each accepted format has a
+  cut-off check: JPEG markers up to EOI, PNG chunks up to IEND, the RIFF
+  size for WebP, top-level box sizes for AVIF.
 - **CLI exit codes.** 0 success. 1 any other error. 2 usage error (clap
   default). 3 input format not supported in this build; in M1 only HEIC/HEIF.
   The CLI checks all inputs before it processes any. If one is HEIC/HEIF, it
@@ -105,7 +111,7 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
 ## Dependencies to add (proposal)
 
 clap, thiserror, image, glycin (or libheif-rs as fallback, see facts),
-mozjpeg, imagequant, lcms2, getrandom. Dev: proptest, assert_cmd, tempfile.
+mozjpeg, imagequant, moxcms, getrandom. Dev: proptest, assert_cmd, tempfile.
 None of them may pull in network crates (S-3). Check licenses fit
 GPL-3.0-or-later.
 
@@ -123,8 +129,13 @@ GPL-3.0-or-later.
   D-Bus service dependency and tests run without `dbus-daemon`. No GTK
   (`gdk4` is an optional feature we do not enable). No network crates.
 - ICC: `color_convert_icc_srgb(false)` keeps the profile for our own
-  conversion (T08). With `true` (the default) glycin converts to sRGB
-  inside the sandbox; T08 may use that instead of lcms2.
+  conversion (T08). Never use `true` (the default): the conversion does
+  not run in the sandbox but in our process (moxcms, glycin-core
+  `src/icc.rs`), on a bad profile it only warns and returns unconverted
+  pixels labelled sRGB, and it skips files that also have CICP. T08 calls
+  moxcms itself (pure Rust, NFR-2), returns its own errors, and handles
+  CICP (`FrameDetails::color_cicp()`, for example an AVIF `nclx` box) with
+  `ColorProfile::new_from_cicp`. An ICC profile wins over CICP.
 - Orientation: `transformation_orientation()` returns gufo-common's
   `Orientation`, whose values are the EXIF numbers (glycin does not
   re-export the type). `apply_transformations(true)` applies it.
@@ -140,6 +151,8 @@ GPL-3.0-or-later.
     height against `Limits` after `load()` and before `next_frame()`.
     glycin's own `Limits` are per side (default 65535 x 65535) with a 60 s
     timeout.
+    After `next_frame()` the core only checks that the frame size equals
+    the header size, so a test proves the early check.
 
 No other section 15 item is needed for M1. They are all portal or GTK facts.
 
@@ -187,7 +200,7 @@ No other section 15 item is needed for M1. They are all portal or GTK facts.
 The devcontainer starts minimal (Rust only). Add these Fedora packages to
 `.devcontainer/Containerfile` in the task that first needs them:
 
-`libheif-devel libwebp-devel nasm cmake lcms2-devel libseccomp-devel glib2-devel fontconfig-devel pkgconf-pkg-config glycin-loaders bubblewrap perl-Image-ExifTool perl-IO-Compress ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
+`libheif-devel libwebp-devel nasm cmake libseccomp-devel glib2-devel fontconfig-devel pkgconf-pkg-config glycin-loaders bubblewrap perl-Image-ExifTool perl-IO-Compress ImageMagick xdg-desktop-portal dbus-daemon python3-dbusmock`
 
 (T05: the `glycin` crate needs `glib2-devel` and `fontconfig-devel`, not
 `glycin-devel`, which is the C library. T02: exiftool needs

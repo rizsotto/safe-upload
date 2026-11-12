@@ -138,7 +138,28 @@ perl -0777 -ne '
     print substr($_, 0, $i + 8 + int($len / 2));
 ' png-src.png >truncated.png
 
-rm -f thumb-src.jpg makernote.bin png-src.png
+# 9. Real WebP and AVIF, with and without alpha. Check the magic bytes:
+#    ImageMagick on stock Fedora silently writes PNG bytes to x.avif, so
+#    AVIF comes from avifenc (libavif-tools).
+mk -size 64x48 gradient:yellow-purple -strip -quality 90 rgb.webp
+mk alpha.png -strip -quality 90 alpha.webp
+mk -size 64x48 gradient:yellow-purple -strip PNG24:rgb-src.png
+avifenc -s 10 rgb-src.png rgb.avif >/dev/null
+avifenc -s 10 alpha.png alpha.avif >/dev/null
+# P3 described only by CICP (nclx: primaries 12 Display P3, transfer 13
+# sRGB, matrix 0 identity for lossless), no ICC profile. Left half
+# rgb(255,0,0), right half rgb(200,120,80), as P3 values.
+mk -size 32x32 xc:"rgb(255,0,0)" -size 32x32 xc:"rgb(200,120,80)" +append \
+    -strip PNG24:p3-src.png
+avifenc -s 10 --lossless --cicp 12/13/0 --ignore-icc p3-src.png p3-nclx.avif >/dev/null
+for f in rgb.webp alpha.webp; do
+    [ "$(head -c 4 "$f")$(head -c 12 "$f" | tail -c 4)" = RIFFWEBP ] || { echo "make.sh: $f is not WebP" >&2; exit 1; }
+done
+for f in rgb.avif alpha.avif p3-nclx.avif; do
+    [ "$(head -c 12 "$f" | tail -c 8)" = ftypavif ] || { echo "make.sh: $f is not AVIF" >&2; exit 1; }
+done
+
+rm -f thumb-src.jpg makernote.bin png-src.png rgb-src.png p3-src.png
 touch "$marker"
 cd /
 rm -rf "$out"

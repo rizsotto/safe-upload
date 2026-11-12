@@ -9,8 +9,14 @@ RUN dnf -y install gcc git sudo && dnf clean all
 RUN dnf -y install glycin-loaders bubblewrap glib2-devel fontconfig-devel \
         libseccomp-devel pkgconf-pkg-config && dnf clean all
 
+# The JPEG encoder: mozjpeg's SIMD code needs nasm. Without it mozjpeg
+# builds without SIMD and only warns; encode.rs has a test that fails then.
+RUN dnf -y install nasm && dnf clean all
+
 # Test fixtures (tests/fixtures/make.sh).
-RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress && dnf clean all
+# avifenc makes real AVIF files; ImageMagick on Fedora cannot.
+RUN dnf -y install ImageMagick perl-Image-ExifTool perl-IO-Compress libavif-tools \
+        && dnf clean all
 
 ARG USERNAME=dev
 ARG USER_UID=1000

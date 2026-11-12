@@ -70,6 +70,19 @@ perl -0777 -ne '
     }
     exit 1;
 ' truncated.png || bad "truncated.png: not cut inside IDAT"
+for f in rgb.webp alpha.webp; do
+    [ "$(head -c 4 "$f")$(head -c 12 "$f" | tail -c 4)" = RIFFWEBP ] || bad "$f: not WebP"
+done
+for f in rgb.avif alpha.avif p3-nclx.avif; do
+    [ "$(head -c 12 "$f" | tail -c 8)" = ftypavif ] || bad "$f: no ftypavif at byte 4"
+done
+[ "$(magick alpha.webp -format '%[opaque]' info:)" = False ] || bad "alpha.webp: no transparency"
+avif_info() { avifdec --info "$1" 2>/dev/null | sed -n "s/^ \* $2 *: //p"; }
+[ "$(avif_info alpha.avif Alpha)" != Absent ] || bad "alpha.avif: no alpha"
+[ "$(avif_info rgb.avif Alpha)" = Absent ] || bad "rgb.avif: has alpha"
+p3=$(avif_info p3-nclx.avif 'Color Primaries')/$(avif_info p3-nclx.avif 'Transfer Char.')/$(avif_info p3-nclx.avif 'Matrix Coeffs.')
+[ "$p3" = 12/13/0 ] || bad "p3-nclx.avif: CICP is $p3, not 12/13/0"
+[ "$(avif_info p3-nclx.avif 'ICC Profile')" = Absent ] || bad "p3-nclx.avif: has an ICC profile"
 [ -f .safe-upload-fixtures ] || bad "no .safe-upload-fixtures marker"
 
 [ "$fail" = 0 ] && echo "fixtures: all checks passed"

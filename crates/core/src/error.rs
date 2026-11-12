@@ -15,6 +15,16 @@ pub enum Error {
     NoRuntimeDir,
     #[error("the private temporary folder is not safe to use")]
     UnsafeTempDir,
+    #[error("cannot decode the image: {0}")]
+    Decode(&'static str),
+    #[error("color conversion failed: {0}")]
+    Color(&'static str),
+    #[error("invalid edit: {0}")]
+    InvalidEdit(&'static str),
+    #[error("encoding failed: {0}")]
+    Encode(&'static str),
+    #[error("the image cannot be made small enough for {target_bytes} bytes")]
+    CannotFit { target_bytes: u64 },
     #[error("output check failed: {0}")]
     Verify(String),
     #[error("input/output error: {0}")]
