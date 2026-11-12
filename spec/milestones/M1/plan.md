@@ -78,6 +78,9 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
   ICC chunks must come before SOF and join by sequence number; PNG iCCP
   must come before PLTE and IDAT. DQT, DHT, SOF, SOS and DRI must have no
   padding. PNG chunks have exact sizes, a fixed order and a checked CRC.
+  JFIF, DRI, each quantization table id and every PNG chunk except IDAT
+  appear at most once; SOS before SOF fails. The PNG iCCP name must be
+  `verify::ICC_PROFILE_NAME` (`icc`); the T09 PNG encoder must write it.
   Not checked: the entropy-coded JPEG data and the IDAT content are not
   decoded, so data hidden inside them would pass. They come from our own
   encoder, which only gets pixels (SPEC 8).

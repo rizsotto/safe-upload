@@ -5,12 +5,18 @@
 //!
 //! Every allowed segment or chunk is checked for its exact size, so no
 //! bytes can hide in padding: JPEG tables are parsed, PNG chunks have fixed
-//! lengths and a checked CRC. Entropy-coded data and IDAT are not decoded.
+//! lengths and a checked CRC. Spare channels are closed: JFIF, DRI, each
+//! quantization table and every PNG chunk but IDAT appear at most once, and
+//! the iCCP name is fixed. Entropy-coded data and IDAT are not decoded.
 
 use crate::Error;
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const ICC_TAG: &[u8] = b"ICC_PROFILE\0";
+
+/// The only profile name allowed in a PNG iCCP chunk. The PNG encoder must
+/// write exactly this name.
+pub const ICC_PROFILE_NAME: &[u8] = b"icc";
 
 /// Checks an encoded output file. Only JPEG and PNG are known; any other
 /// format fails. `expected_icc` is the only ICC profile allowed, byte for
@@ -43,6 +49,9 @@ fn verify_jpeg(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
     let mut scans = 0;
     // ICC chunks by sequence number (1-based), and the declared count.
     let mut icc: Vec<Option<&[u8]>> = Vec::new();
+    let mut quant_tables = [false; 4];
+    let mut seen_jfif = false;
+    let mut seen_dri = false;
     loop {
         if b.get(i) != Some(&0xff) {
             return Err(fail("JPEG: missing marker or end of image"));
@@ -101,9 +110,11 @@ fn verify_jpeg(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
                 }
             }
             0xc4 => check_dht(p)?,
-            0xdb => check_dqt(p)?,
-            0xdd if p.len() == 2 => {}
-            0xe0 if before_frame && is_plain_jfif(p) => {}
+            0xdb => check_dqt(p, &mut quant_tables)?,
+            0xdd if p.len() == 2 && !std::mem::replace(&mut seen_dri, true) => {}
+            0xe0 if before_frame
+                && is_plain_jfif(p)
+                && !std::mem::replace(&mut seen_jfif, true) => {}
             0xe2 if before_frame && p.starts_with(ICC_TAG) => {
                 let (seq, count, data) = match p[ICC_TAG.len()..] {
                     [seq, count, ref data @ ..] => (usize::from(seq), usize::from(count), data),
@@ -119,6 +130,7 @@ fn verify_jpeg(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
                     return Err(fail("JPEG: repeated ICC chunk"));
                 }
             }
+            0xda if before_frame => return Err(fail("JPEG: scan before the frame header")),
             0xda => {
                 let n = usize::from(*p.first().unwrap_or(&0));
                 if n == 0 || p.len() != 1 + 2 * n + 3 {
@@ -137,16 +149,21 @@ fn verify_jpeg(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
     }
 }
 
-/// Quantization tables must fill the segment exactly.
-fn check_dqt(mut p: &[u8]) -> Result<(), Error> {
+/// Quantization tables must fill the segment exactly. Each table id is
+/// defined once; an empty segment fails.
+fn check_dqt(mut p: &[u8], defined: &mut [bool; 4]) -> Result<(), Error> {
+    if p.is_empty() {
+        return Err(fail("JPEG: empty quantization table segment"));
+    }
     while let Some((&pq_tq, rest)) = p.split_first() {
         let size = match pq_tq >> 4 {
             0 => 64,
             1 => 128,
             _ => return Err(fail("JPEG: bad quantization table")),
         };
-        if pq_tq & 0x0f > 3 || rest.len() < size {
-            return Err(fail("JPEG: bad quantization table"));
+        let id = usize::from(pq_tq & 0x0f);
+        if id > 3 || rest.len() < size || std::mem::replace(&mut defined[id], true) {
+            return Err(fail("JPEG: bad or repeated quantization table"));
         }
         p = &rest[size..];
     }
@@ -221,17 +238,17 @@ fn verify_png(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
     use PngStage::*;
     let mut i = PNG_SIGNATURE.len();
     let mut stage = None;
-    let mut seen_icc = false;
+    let mut seen: Vec<[u8; 4]> = Vec::new();
     loop {
         let Some(header) = b.get(i..i + 8) else {
             return Err(fail("PNG: missing end chunk"));
         };
         let len = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
         let kind: &[u8; 4] = header[4..8].try_into().unwrap();
-        let end = i + 8 + len + 4;
-        if len > 0x7fff_ffff || end > b.len() {
-            return Err(fail("PNG: bad chunk length"));
-        }
+        let end = match len.checked_add(12).and_then(|n| n.checked_add(i)) {
+            Some(end) if len <= 0x7fff_ffff && end <= b.len() => end,
+            _ => return Err(fail("PNG: bad chunk length")),
+        };
         let data = &b[i + 8..i + 8 + len];
         let crc = u32::from_be_bytes(b[end - 4..end].try_into().unwrap());
         if crc != crc32(&b[i + 4..i + 8 + len]) {
@@ -239,11 +256,22 @@ fn verify_png(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
         }
         i = end;
 
+        // Every chunk but IDAT may appear only once.
+        if kind != b"IDAT" {
+            if seen.contains(kind) {
+                return Err(fail(format!(
+                    "PNG: repeated {} chunk",
+                    String::from_utf8_lossy(kind)
+                )));
+            }
+            seen.push(*kind);
+        }
+
         // Chunk, the stage it moves to, and whether it may appear there.
         let (next, ok) = match (kind, stage) {
             (b"IHDR", None) => (Header, len == 13),
             (_, None) => return Err(fail("PNG: first chunk is not IHDR")),
-            (b"iCCP", Some(Header)) => (Header, !seen_icc),
+            (b"iCCP", Some(Header)) => (Header, true),
             (b"sRGB", Some(Header)) => (Header, len == 1),
             (b"gAMA", Some(Header)) => (Header, len == 4),
             (b"cHRM", Some(Header)) => (Header, len == 32),
@@ -272,7 +300,6 @@ fn verify_png(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
         stage = Some(next);
 
         if kind == b"iCCP" {
-            seen_icc = true;
             check_iccp(data, expected_icc)?;
         }
         if next == AfterData {
@@ -284,14 +311,13 @@ fn verify_png(b: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
     }
 }
 
-/// iCCP: name (1 to 79 bytes), NUL, method 0, zlib stream with nothing after.
+/// iCCP: our fixed name, NUL, method 0, zlib stream with nothing after.
 fn check_iccp(data: &[u8], expected_icc: Option<&[u8]>) -> Result<(), Error> {
     let want = expected_icc.ok_or_else(|| fail("unexpected ICC profile"))?;
-    let nul = data
-        .iter()
-        .position(|&c| c == 0)
-        .filter(|&n| (1..=79).contains(&n))
-        .ok_or_else(|| fail("PNG: bad iCCP name"))?;
+    let nul = ICC_PROFILE_NAME.len();
+    if !data.starts_with(ICC_PROFILE_NAME) || data.get(nul) != Some(&0) {
+        return Err(fail("PNG: iCCP profile name is not ours"));
+    }
     if data.get(nul + 1) != Some(&0) {
         return Err(fail("PNG: bad iCCP compression method"));
     }
@@ -534,7 +560,10 @@ mod tests {
 
     fn iccp(profile: &[u8]) -> Vec<u8> {
         let z = miniz_oxide::deflate::compress_to_vec_zlib(profile, 6);
-        chunk(b"iCCP", &[b"icc\0\0".as_slice(), &z].concat())
+        chunk(
+            b"iCCP",
+            &[ICC_PROFILE_NAME, b"\0\0".as_slice(), &z].concat(),
+        )
     }
 
     fn png_with(head: &[Vec<u8>], tail: &[Vec<u8>]) -> Vec<u8> {
@@ -669,5 +698,62 @@ mod tests {
     fn unknown_format_fails() {
         assert!(rejects(b"RIFF\0\0\0\0WEBPVP8 ", None));
         assert!(rejects(&[], None));
+    }
+
+    #[test]
+    fn png_iccp_name_must_be_ours() {
+        let z = miniz_oxide::deflate::compress_to_vec_zlib(ICC, 6);
+        let named = |name: &[u8]| chunk(b"iCCP", &[name, b"\0\0".as_slice(), &z].concat());
+        verify(&png(&[named(ICC_PROFILE_NAME)]), Some(ICC)).unwrap();
+        assert!(rejects(&png(&[named(b"GPS 47.5N Jane Doe")]), Some(ICC)));
+        assert!(rejects(&png(&[named(b"ICC")]), Some(ICC)));
+    }
+
+    #[test]
+    fn png_repeated_chunks_fail() {
+        for c in [
+            chunk(b"tRNS", &[0]),
+            chunk(b"gAMA", &[0; 4]),
+            chunk(b"cHRM", &[0; 32]),
+            chunk(b"sRGB", &[0]),
+            chunk(b"PLTE", &[0; 3]),
+        ] {
+            assert!(rejects(&png(&[c.clone(), c]), None));
+        }
+    }
+
+    #[test]
+    fn jpeg_repeated_or_empty_segments_fail() {
+        assert!(rejects(&jpeg(&[seg(0xe0, JFIF)]), None));
+        let mut v = jpeg(&[]);
+        let sof = v.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+        v.splice(sof..sof, seg(0xdb, &[]));
+        assert!(rejects(&v, None));
+        let mut w = jpeg(&[]);
+        w.splice(sof..sof, [seg(0xdb, &[]), seg(0xdb, &[])].concat());
+        assert!(rejects(&w, None));
+    }
+
+    #[test]
+    fn jpeg_scan_before_frame_fails() {
+        // SOS first, then ICC and JFIF "before the frame", then SOF.
+        let mut v = vec![0xff, 0xd8];
+        v.extend(seg(0xdb, &[0; 65]));
+        v.extend(seg(0xc4, &[0; 17]));
+        v.extend(scan());
+        v.extend(seg(0xe0, JFIF));
+        v.extend(icc_seg(1, 1, ICC));
+        v.extend(frame());
+        v.extend(scan());
+        v.extend([0xff, 0xd9]);
+        assert!(rejects(&v, Some(ICC)));
+    }
+
+    #[test]
+    fn huge_png_length_does_not_overflow() {
+        let mut v = png(&[]);
+        let at = PNG_SIGNATURE.len() + 25;
+        v.splice(at..at, [0x7f, 0xff, 0xff, 0xff, b'I', b'D', b'A', b'T']);
+        assert!(rejects(&v, None));
     }
 }
