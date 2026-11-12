@@ -117,14 +117,20 @@ fn run(cli: &Cli) -> Result<(), u8> {
         eprintln!("safe-upload: {e}");
         EXIT_ERROR
     })?;
-    let result = prepare_all(cli, &dir).and_then(|prepared| match &cli.o {
-        Some(o) => deliver(&cli.inputs, &prepared, o, out_dir.is_some()),
-        None => {
-            for p in &prepared {
-                println!("{}", p.path.display());
+    let result = prepare_all(cli, &dir).and_then(|prepared| {
+        match &cli.o {
+            Some(o) => deliver(&cli.inputs, &prepared, o, out_dir.is_some())?,
+            None => {
+                for p in &prepared {
+                    println!("{}", p.path.display());
+                }
             }
-            Ok(())
         }
+        // The summary goes to stderr, so stdout stays a list of paths.
+        for (i, p) in prepared.iter().enumerate() {
+            eprintln!("Image {}: {}", i + 1, p.summary);
+        }
+        Ok(())
     });
     if result.is_err() || cli.o.is_some() {
         let _ = dir.remove();

@@ -5,11 +5,13 @@
 //! back and verified. If the check fails, the file is deleted and an error
 //! is returned. The original is never used as a fallback.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::decode::{Decoder, GlycinDecoder};
 use crate::encode::{Encoder, JpegEncoder, OutputProfile, Pixels, PngEncoder};
 use crate::output::{PrivateDir, neutral_name};
+use crate::summary::{self, Summary};
 use crate::{Error, Limits, Options, OutputFormat, color, edit, fit, orient, sniff, verify};
 
 /// The profile embedded in every output: none. The pixels are sRGB, which
@@ -28,10 +30,7 @@ pub struct Target<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     pub path: PathBuf,
-    pub input_bytes: u64,
-    pub input_size: (u32, u32),
-    pub output_bytes: u64,
-    pub output_size: (u32, u32),
+    pub summary: Summary,
 }
 
 /// The encoder for each output format. Tests swap it.
@@ -70,11 +69,11 @@ pub fn prepare_with(
     encoder_for: EncoderFor<'_>,
 ) -> Result<Prepared, Error> {
     sniff::check_file(input)?;
-    let input_bytes = std::fs::metadata(input)?.len();
 
     // 1. Decode in the sandbox.
     let decoded = decoder.decode(input, limits)?;
     let input_size = decoded.pixels.dimensions();
+    let (input_bytes, removed) = scan_input(input, limits)?;
     // 2. Orientation, before the metadata is gone (FR-2).
     let image = orient::apply(decoded.pixels, decoded.orientation);
     // 3. and 4. Crop, then burn in the redactions (FR-5).
@@ -96,10 +95,13 @@ pub fn prepare_with(
     }
     Ok(Prepared {
         path,
-        input_bytes,
-        input_size,
-        output_bytes: fitted.bytes.len() as u64,
-        output_size: (fitted.width, fitted.height),
+        summary: Summary {
+            input_bytes,
+            output_bytes: fitted.bytes.len() as u64,
+            input_size,
+            output_size: (fitted.width, fitted.height),
+            removed,
+        },
     })
 }
 
@@ -119,6 +121,19 @@ fn output_name(input: &Path, opts: &Options, target: Target<'_>, ext: &str) -> S
         Some(stem) if opts.keep_name && !stem.is_empty() => format!("{stem}.{ext}"),
         _ => neutral_name(target.position, target.total, ext),
     }
+}
+
+/// The input size and the metadata kinds in it, for the summary (FR-8).
+fn scan_input(
+    input: &Path,
+    limits: &Limits,
+) -> Result<(u64, Option<Vec<summary::Removed>>), Error> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(input)?
+        .take(limits.max_file_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    limits.check_file_size(bytes.len() as u64)?;
+    Ok((bytes.len() as u64, summary::scan(&bytes)))
 }
 
 fn verify_file(path: &Path) -> Result<(), Error> {

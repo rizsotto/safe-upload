@@ -12,6 +12,7 @@ pub mod orient;
 pub mod output;
 pub mod pipeline;
 pub mod sniff;
+pub mod summary;
 pub mod verify;
 
 pub use error::Error;

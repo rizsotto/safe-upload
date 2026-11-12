@@ -59,6 +59,10 @@ fn m1_command_line_works() {
         .success();
     let out = fs::read(env.work.path().join("out.jpg")).unwrap();
     assert!(out.len() < 2_000_000);
+    assert!(
+        out.len() < input.len(),
+        "metadata and the thumbnail are gone"
+    );
     assert!(out.starts_with(&[0xff, 0xd8]));
     assert_eq!(
         env.private_files(),
@@ -193,4 +197,25 @@ fn errors_do_not_show_paths() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("input 1"), "{stderr}");
     assert!(!stderr.contains("secret-name"), "{stderr}");
+}
+
+#[test]
+fn prints_a_summary_on_stderr() {
+    let env = Env::new();
+    let out = env
+        .cmd()
+        .arg(fixture("exif-gps-thumb.jpg"))
+        .args(["--max-size", "2MB", "-o", "out.jpg"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.starts_with("Image 1: "), "{stderr}");
+    assert!(stderr.contains("640x480 → 640x480"), "{stderr}");
+    assert!(stderr.contains("Location"), "{stderr}");
+    assert!(
+        !stderr.contains("out.jpg") && !stderr.contains("Budapest"),
+        "{stderr}"
+    );
 }

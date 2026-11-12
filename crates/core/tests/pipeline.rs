@@ -64,8 +64,8 @@ fn every_fixture_prepares() {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(p.path, dir.path().join(format!("image.{ext}")), "{name}");
         let bytes = fs::read(&p.path).unwrap();
-        assert_eq!(bytes.len() as u64, p.output_bytes, "{name}");
-        assert!(p.output_bytes <= target, "{name}");
+        assert_eq!(bytes.len() as u64, p.summary.output_bytes, "{name}");
+        assert!(p.summary.output_bytes <= target, "{name}");
         verify(&bytes, None).unwrap_or_else(|e| panic!("{name}: {e}"));
         let mode = fs::metadata(&p.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{name}");
@@ -81,8 +81,8 @@ fn orientation_6_swaps_the_size() {
         one(&dir),
     )
     .unwrap();
-    assert_eq!(p.input_size, (64, 96));
-    assert_eq!(p.output_size, (96, 64));
+    assert_eq!(p.summary.input_size, (64, 96));
+    assert_eq!(p.summary.output_size, (96, 64));
 }
 
 #[test]
@@ -198,6 +198,62 @@ fn max_long_edge_and_redaction_are_applied() {
     opts.crop = Some(Rect::new(0, 0, 640, 400));
     opts.redactions = vec![Redaction::black_box(Rect::new(0, 0, 640, 400))];
     let p = prepare(&fixtures().join("exif-gps-thumb.jpg"), &opts, one(&dir)).unwrap();
-    assert_eq!(p.input_size, (640, 480));
-    assert_eq!(p.output_size, (320, 200));
+    assert_eq!(p.summary.input_size, (640, 480));
+    assert_eq!(p.summary.output_size, (320, 200));
+}
+
+#[test]
+fn summary_names_removed_kinds_without_values() {
+    use safe_upload_core::summary::Removed::*;
+    let dir = private_dir("summary");
+    let input = fixtures().join("exif-gps-thumb.jpg");
+    let p = prepare(&input, &Options::new(1_000_000), one(&dir)).unwrap();
+    let removed = p.summary.removed.clone().unwrap();
+    for kind in [Location, Camera, Date, MakerNotes, Thumbnail, Xmp, Iptc] {
+        assert!(removed.contains(&kind), "{kind:?} missing from {removed:?}");
+    }
+    assert_eq!(p.summary.input_bytes, fs::metadata(&input).unwrap().len());
+    let text = p.summary.to_string();
+    assert!(text.contains("Location"), "{text}");
+    for secret in [
+        "FixtureCam",
+        "FixtureModel",
+        "SN12345",
+        "2026",
+        "Budapest",
+        "Fixture Person",
+        "SECRET",
+        "47.5",
+        "19.04",
+        "exif-gps-thumb",
+        "image.jpg",
+    ] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+
+    let p = prepare(
+        &fixtures().join("png-text.png"),
+        &Options::new(1_000_000),
+        Target {
+            dir: &dir,
+            position: 2,
+            total: 2,
+        },
+    )
+    .unwrap();
+    let removed = p.summary.removed.unwrap();
+    for kind in [Location, Camera, Text, Xmp] {
+        assert!(removed.contains(&kind), "{kind:?} missing from {removed:?}");
+    }
+    let p = prepare(
+        &fixtures().join("p3.jpg"),
+        &Options::new(1_000_000),
+        Target {
+            dir: &dir,
+            position: 3,
+            total: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(p.summary.removed.unwrap(), [ColorProfile]);
 }
