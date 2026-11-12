@@ -1,6 +1,7 @@
 //! Image pipeline: decode, orient, redact, strip, fit to size. No GTK, no D-Bus.
 
 pub mod color;
+pub mod decode;
 pub mod edit;
 pub mod encode;
 mod error;

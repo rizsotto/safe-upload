@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+futures-lite = "2"
 getrandom = "0.3"
 glycin = "4"
 image = { version = "0.25", default-features = false }
@@ -15,6 +16,3 @@ miniz_oxide = "0.8"
 mozjpeg = "0.10"
 png = "0.18"
 thiserror = "2"
-
-[dev-dependencies]
-futures-lite = "2"

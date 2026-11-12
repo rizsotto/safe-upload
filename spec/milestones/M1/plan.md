@@ -93,6 +93,11 @@ pub fn prepare(input: &Path, opts: &Options, out: &PrivateDir)
   Fedora decodes). A file cut off after the `ftyp` box is still refused. The
   check runs before glycin sees the file, so the result is the same on hosts
   that have an HEVC decoder. Error: `Error::UnsupportedFormat(Format::Heif)`.
+- **Decode input formats.** `decode` accepts only JPEG, PNG, WebP and
+  AVIF (SPEC 4), detected by content. Anything else (GIF, SVG, TIFF...)
+  gives `Error::Decode` before glycin sees it. Each accepted format has a
+  cut-off check: JPEG markers up to EOI, PNG chunks up to IEND, the RIFF
+  size for WebP, top-level box sizes for AVIF.
 - **CLI exit codes.** 0 success. 1 any other error. 2 usage error (clap
   default). 3 input format not supported in this build; in M1 only HEIC/HEIF.
   The CLI checks all inputs before it processes any. If one is HEIC/HEIF, it
