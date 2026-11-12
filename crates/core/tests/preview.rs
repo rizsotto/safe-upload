@@ -145,7 +145,10 @@ fn decode_timeout_fails_closed() {
     let Err(err) = preview(&fixtures().join("exif-gps-thumb.jpg"), &limits, 2048) else {
         panic!("decoded within 1 ms");
     };
-    assert!(matches!(err, Error::Decode(_)), "{err}");
+    assert!(
+        matches!(err, Error::Decode(_)) && err.to_string().contains("decoding took too long"),
+        "{err}"
+    );
 }
 
 #[test]
