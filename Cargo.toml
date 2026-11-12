@@ -7,3 +7,8 @@ version = "0.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
+
+# mozjpeg's C code is about twice as slow unoptimized, which makes the
+# encoder and fit-to-size tests slow.
+[profile.dev.package.mozjpeg-sys]
+opt-level = 3

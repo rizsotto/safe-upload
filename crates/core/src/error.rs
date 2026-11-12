@@ -23,6 +23,8 @@ pub enum Error {
     InvalidEdit(&'static str),
     #[error("encoding failed: {0}")]
     Encode(&'static str),
+    #[error("the image cannot be made small enough for {target_bytes} bytes")]
+    CannotFit { target_bytes: u64 },
     #[error("output check failed: {0}")]
     Verify(String),
     #[error("input/output error: {0}")]

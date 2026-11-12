@@ -5,6 +5,7 @@ pub mod decode;
 pub mod edit;
 pub mod encode;
 mod error;
+pub mod fit;
 mod limits;
 mod options;
 pub mod orient;

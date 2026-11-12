@@ -36,6 +36,10 @@ pub trait Encoder {
     fn encode(&self, px: &Pixels, quality: u8) -> Result<Vec<u8>, Error>;
     /// File name extension, without the dot.
     fn extension(&self) -> &'static str;
+    /// The qualities the fit-to-size search tries (SPEC 9.3).
+    fn quality_range(&self) -> (u8, u8) {
+        (40, 92)
+    }
 }
 
 /// JPEG through mozjpeg. Transparent pixels are put on white.
@@ -148,6 +152,11 @@ impl Encoder for PngEncoder {
 
     fn extension(&self) -> &'static str {
         "png"
+    }
+
+    /// The top of the range is lossless.
+    fn quality_range(&self) -> (u8, u8) {
+        (40, 100)
     }
 }
 
