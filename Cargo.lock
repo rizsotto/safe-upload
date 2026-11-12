@@ -2290,6 +2290,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "safe-upload-core",
  "tempfile",
 ]
 
