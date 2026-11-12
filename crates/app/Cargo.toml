@@ -8,7 +8,8 @@ publish.workspace = true
 [dependencies]
 adw.workspace = true
 gettext-rs.workspace = true
-gtk.workspace = true
+gtk = { workspace = true, features = ["v4_10"] }
+safe-upload-core = { path = "../core" }
 
 [dev-dependencies]
 libc = "0.2"
