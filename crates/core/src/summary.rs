@@ -141,6 +141,8 @@ fn scan_jpeg(b: &[u8], found: &mut Vec<Removed>) {
             0xe1 if seg.starts_with(b"Exif\0\0") => scan_exif(&seg[6..], found),
             0xe1 if seg.starts_with(b"http://ns.adobe.com/") => found.push(Removed::Xmp),
             0xe2 if seg.starts_with(b"ICC_PROFILE\0") => found.push(Removed::ColorProfile),
+            // Multi-Picture Format: extra images, usually a large preview.
+            0xe2 if seg.starts_with(b"MPF\0") => found.push(Removed::Thumbnail),
             0xed => found.push(Removed::Iptc),
             0xfe => found.push(Removed::Comment),
             _ => {}
@@ -297,6 +299,12 @@ mod tests {
                 Removed::Comment
             ]
         );
+    }
+
+    #[test]
+    fn mpf_preview_is_a_thumbnail() {
+        let j = jpeg(&[(0xe2, b"MPF\0MM\0\x2a\0\0\0\x08")]);
+        assert_eq!(scan(&j).unwrap(), [Removed::Thumbnail]);
     }
 
     #[test]
