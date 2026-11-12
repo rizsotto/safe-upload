@@ -1,5 +1,5 @@
-//! Decodes untrusted files with glycin inside the bwrap sandbox (SPEC 9.1
-//! step 1, S-4, NFR-2).
+//! Decodes untrusted files with glycin inside a sandbox (SPEC 9.1 step 1,
+//! S-4, NFR-2): bwrap on the host, `flatpak-spawn --sandbox` in a Flatpak.
 //!
 //! Before glycin sees a file we check its size, refuse HEIF (`sniff`),
 //! accept only JPEG, PNG, WebP and AVIF, and check that the file is not
@@ -11,7 +11,7 @@ use std::io::Read;
 use std::path::Path;
 
 use futures_lite::future::block_on;
-use glycin::{Loader, MemoryFormat, MemoryFormatSelection, SandboxMechanism, SandboxSelector};
+use glycin::{Loader, MainContextSelector, MemoryFormat, MemoryFormatSelection, SandboxMechanism};
 use image::RgbaImage;
 
 use crate::color::SourceColor;
@@ -32,8 +32,8 @@ pub trait Decoder {
     fn decode(&self, path: &Path, limits: &Limits) -> Result<Decoded, Error>;
 }
 
-/// The glycin decoder. Always uses the bwrap sandbox; if bwrap cannot run,
-/// decoding fails.
+/// The glycin decoder. Always uses a sandbox (see [`sandbox_for`]); if it
+/// cannot run, decoding fails.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GlycinDecoder;
 
@@ -91,19 +91,37 @@ impl GlycinDecoder {
     }
 }
 
-/// Runs the checks before glycin, then `load()` in the bwrap sandbox.
+const FLATPAK_INFO: &str = "/.flatpak-info";
+
+/// The sandbox to decode in: `FlatpakSpawn` if `flatpak_info` exists (we
+/// run in a Flatpak, where bwrap cannot run), else `Bwrap`. Never `Auto`,
+/// which silently drops the sandbox when bwrap is blocked, and never
+/// `NotSandboxed`.
+fn sandbox_for(flatpak_info: &Path) -> SandboxMechanism {
+    if flatpak_info.exists() {
+        SandboxMechanism::FlatpakSpawn
+    } else {
+        SandboxMechanism::Bwrap
+    }
+}
+
+/// Runs the checks before glycin, then `load()` in the sandbox.
 fn open(bytes: Vec<u8>, limits: &Limits) -> Result<glycin::Image, Error> {
     sniff::sniff(&bytes)?;
     check_complete(&bytes)?;
+    let sandbox = sandbox_for(Path::new(FLATPAK_INFO));
     let mut loader = Loader::new_vec(bytes);
+    // Managed: glycin runs its own loop thread, so decoding never waits on
+    // the app's main loop.
     loader
-        .sandbox_selector(SandboxSelector::Bwrap)
+        .sandbox_selector(sandbox.into_selector())
+        .main_context_selector(MainContextSelector::Managed)
         .apply_transformations(false)
         .color_convert_icc_srgb(false)
         .accepted_memory_formats(MemoryFormatSelection::R8g8b8a8)
         .limits(glycin::Limits::default().timeout(limits.decode_timeout));
     let image = block_on(loader.load()).map_err(|_| Error::Decode("cannot read the image"))?;
-    if image.active_sandbox_mechanism() != SandboxMechanism::Bwrap {
+    if image.active_sandbox_mechanism() != sandbox {
         return Err(Error::Decode("the decoder did not run in the sandbox"));
     }
     Ok(image)
@@ -250,6 +268,17 @@ mod tests {
     fn core_decoder_runs_in_bwrap() {
         let image = open(jpeg(), &Limits::default()).unwrap();
         assert_eq!(image.active_sandbox_mechanism(), SandboxMechanism::Bwrap);
+    }
+
+    #[test]
+    fn flatpak_info_selects_flatpak_spawn() {
+        let dir = std::env::temp_dir().join(format!("su-sandbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = dir.join(".flatpak-info");
+        std::fs::write(&info, "[Application]\n").unwrap();
+        assert_eq!(sandbox_for(&info), SandboxMechanism::FlatpakSpawn);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(sandbox_for(&info), SandboxMechanism::Bwrap);
     }
 
     #[test]
