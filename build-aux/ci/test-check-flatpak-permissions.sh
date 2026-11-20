@@ -123,6 +123,11 @@ printf 'shared=ipc;\n' >"$tmp/meta-nogroup"
 expect 2 "$tmp/clean.json" "$tmp/meta-nogroup"
 expect 2 "$tmp/clean.json" "$tmp/no-such-dir"
 
+# A second manifest (the action's rewritten copy) is checked as a manifest.
+expect 0 "$tmp/clean.json" "$tmp/none.json" "$tmp/build"
+expect 1 "$tmp/clean.json" "$tmp/test-net.json" "$tmp/build"
+expect 2 "$tmp/clean.json" "$tmp/broken.json"
+
 for m in "$here"/../flatpak/*.json; do
     [ "$(basename "$m")" = cargo-sources.json ] || expect 0 "$m"
 done
