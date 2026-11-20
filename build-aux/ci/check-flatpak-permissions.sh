@@ -2,11 +2,12 @@
 # Fails if the Flatpak manifest or the built app's metadata grants more than
 # the app needs: no network (SPEC S-3, M2 "no network permission"), no
 # filesystem, no bus names. Only the finish-args below are allowed.
-# Usage: check-flatpak-permissions.sh MANIFEST [METADATA_OR_BUILD_DIR...]
-#   A build dir (flatpak-builder output) is checked through its metadata file.
+# Usage: check-flatpak-permissions.sh MANIFEST [MANIFEST_OR_METADATA_OR_BUILD_DIR...]
+#   Later arguments ending in .json are manifests too. A build dir
+#   (flatpak-builder output) is checked through its metadata file.
 set -eu
 
-[ "$#" -ge 1 ] || { echo "usage: $0 MANIFEST [METADATA_OR_BUILD_DIR...]" >&2; exit 2; }
+[ "$#" -ge 1 ] || { echo "usage: $0 MANIFEST [MANIFEST_OR_METADATA_OR_BUILD_DIR...]" >&2; exit 2; }
 
 exec python3 -I - "$@" <<'EOF'
 import configparser
@@ -99,7 +100,10 @@ def check_metadata(path):
 try:
     check_manifest(sys.argv[1])
     for p in sys.argv[2:]:
-        check_metadata(p)
+        if p.endswith(".json"):
+            check_manifest(p)
+        else:
+            check_metadata(p)
 except (OSError, ValueError, configparser.Error) as e:
     print(f"flatpak-permissions: cannot check: {e}", file=sys.stderr)
     sys.exit(2)
